@@ -1,0 +1,9 @@
+# Çalışma anında oluşan oda verileri (oyuncu/oyun durumu)
+/data/rooms/*.json
+
+# Sistem / editör dosyaları
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/

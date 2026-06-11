@@ -1,0 +1,3 @@
+# JSON oda dosyalarına doğrudan web erişimini engelle
+Require all denied
+Deny from all

@@ -1,0 +1,609 @@
+<?php
+declare(strict_types=1);
+require __DIR__ . '/lib.php';
+
+header('Content-Type: application/json; charset=utf-8');
+
+// Girdi: hem form-data hem JSON gövdesini destekle
+$action = $_REQUEST['action'] ?? '';
+$body = [];
+$rawBody = file_get_contents('php://input');
+if ($rawBody) {
+    $decoded = json_decode($rawBody, true);
+    if (is_array($decoded)) {
+        $body = $decoded;
+    }
+}
+function inp(string $key, $default = null)
+{
+    global $body;
+    if (isset($_REQUEST[$key])) {
+        return $_REQUEST[$key];
+    }
+    return $body[$key] ?? $default;
+}
+
+$room  = trim((string) inp('room', ''));
+$token = (string) inp('token', '');
+
+try {
+    switch ($action) {
+        case 'join':       handle_join($room); break;
+        case 'state':      handle_state($room, $token); break;
+        case 'start_slot': handle_admin_simple($room, $token, 'start_slot'); break;
+        case 'spin':       handle_admin_simple($room, $token, 'spin'); break;
+        case 'approve_letter': handle_admin_simple($room, $token, 'approve'); break;
+        case 'skip_letter':    handle_admin_simple($room, $token, 'skip'); break;
+        case 'save_answer':    handle_save_answer($room, $token); break;
+        case 'end_round':      handle_admin_simple($room, $token, 'end_round'); break;
+        case 'new_round':      handle_admin_simple($room, $token, 'new_round'); break;
+        case 'new_game':       handle_admin_simple($room, $token, 'new_game'); break;
+        case 'end_game':       handle_admin_simple($room, $token, 'end_game'); break;
+        case 'to_lobby':       handle_admin_simple($room, $token, 'to_lobby'); break;
+        case 'leave':          handle_leave($room, $token); break;
+        case 'send_message':   handle_send_message($room, $token); break;
+        case 'invalidate_answer': handle_invalidate($room, $token); break;
+        case 'start_finish':   handle_start_finish($room, $token); break;
+        case 'penalty':        handle_penalty($room, $token); break;
+        default:
+            json_out(['ok' => false, 'error' => 'Bilinmeyen işlem'], 400);
+    }
+} catch (Throwable $e) {
+    json_out(['ok' => false, 'error' => 'Sunucu hatası: ' . $e->getMessage()], 500);
+}
+
+// ---- İşleyiciler ----
+
+function handle_join(string $room): void
+{
+    $name = trim((string) inp('name', ''));
+    if (!valid_room($room)) {
+        json_out(['ok' => false, 'error' => 'Geçersiz oda numarası (1-32 harf/rakam).'], 400);
+    }
+    if ($name === '' || mb_strlen($name) > 24) {
+        json_out(['ok' => false, 'error' => 'Geçerli bir takma ad girin (1-24 karakter).'], 400);
+    }
+
+    $myToken = gen_token();
+    $result = with_room($room, true, function (array &$data) use ($name, $myToken) {
+        // Oyun çoktan başladıysa (lobi değilse) yeni girişe izin verme
+        if (!empty($data['adminToken']) && ($data['status'] ?? 'lobby') !== 'lobby') {
+            return ['blocked' => true];
+        }
+        $isAdmin = false;
+        if (empty($data['adminToken'])) {
+            $data['adminToken'] = $myToken;
+            $isAdmin = true;
+        }
+        $data['players'][$myToken] = [
+            'name'     => $name,
+            'score'    => 0,
+            'joinedAt' => time(),
+            'lastSeen' => time(),
+            'pid'      => bin2hex(random_bytes(4)), // açık (gizli olmayan) oyuncu kimliği
+        ];
+        return ['isAdmin' => $isAdmin];
+    });
+
+    if (!empty($result['blocked'])) {
+        json_out(['ok' => false, 'error' => 'Bu odada oyun çoktan başlamış, şu an girilemez. Oyun bitince tekrar deneyin.'], 409);
+    }
+
+    json_out([
+        'ok'      => true,
+        'token'   => $myToken,
+        'room'    => $room,
+        'isAdmin' => $result['isAdmin'],
+    ]);
+}
+
+function handle_state(string $room, string $token): void
+{
+    $res = with_room($room, false, function (array &$data) use ($token) {
+        // yoklama: bu oyuncunun "son görülme"si
+        if (isset($data['players'][$token])) {
+            $data['players'][$token]['lastSeen'] = time();
+        }
+        // geri sayım dolduysa turu bitir
+        if (($data['status'] ?? '') === 'round'
+            && !empty($data['currentRound']['finishAt'])
+            && time() >= $data['currentRound']['finishAt']) {
+            finalize_round($data, false);
+        }
+        // admin/oyuncu yoklaması + gerekirse host devri
+        reconcile_room($data);
+        return ['state' => build_state($data, $token)];
+    });
+    if ($res === null) {
+        json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    }
+    json_out(['ok' => true, 'state' => $res['state']]);
+}
+
+// Sessiz oyuncuları düşür; admin yoksa/sessizse yetkiyi devret
+function reconcile_room(array &$data): void
+{
+    $now = time();
+    // uzun süredir görünmeyen oyuncuları çıkar
+    foreach ($data['players'] as $tok => $p) {
+        $ls = $p['lastSeen'] ?? ($p['joinedAt'] ?? $now);
+        if ($now - $ls > PLAYER_TIMEOUT) {
+            unset($data['players'][$tok]);
+        }
+    }
+    // admin geçerli mi? (var, listede ve son ADMIN_TIMEOUT içinde görülmüş)
+    $adminTok = $data['adminToken'] ?? null;
+    $adminOk = $adminTok
+        && isset($data['players'][$adminTok])
+        && ($now - ($data['players'][$adminTok]['lastSeen'] ?? 0) <= ADMIN_TIMEOUT);
+    if (!$adminOk && !empty($data['players'])) {
+        $data['adminToken'] = pick_new_admin($data['players'], $now);
+    }
+}
+
+// Yeni admin seç: önce "taze" olanlardan en eski katılan, yoksa genel en eski
+function pick_new_admin(array $players, int $now): ?string
+{
+    $best = null; $bestJoin = PHP_INT_MAX;
+    foreach ($players as $tok => $p) {
+        if ($now - ($p['lastSeen'] ?? 0) <= ADMIN_TIMEOUT) {
+            $j = $p['joinedAt'] ?? 0;
+            if ($j < $bestJoin) { $bestJoin = $j; $best = $tok; }
+        }
+    }
+    if ($best !== null) return $best;
+    foreach ($players as $tok => $p) {
+        $j = $p['joinedAt'] ?? 0;
+        if ($j < $bestJoin) { $bestJoin = $j; $best = $tok; }
+    }
+    return $best;
+}
+
+// Tur puanlamasını yapan ortak fonksiyon. $gameover true ise oyun biter.
+function finalize_round(array &$data, bool $gameover): bool
+{
+    if (($data['status'] ?? '') !== 'round' || empty($data['currentRound'])) {
+        return false;
+    }
+    $letter  = $data['currentRound']['letter'];
+    $answers = $data['currentRound']['answers'] ?? [];
+    $scores  = compute_scores($data['players'], $answers, $letter);
+    foreach ($scores as $tok => $r) {
+        if (isset($data['players'][$tok])) {
+            $data['players'][$tok]['score'] += $r['points'];
+        }
+    }
+    $data['rounds'][] = [
+        'letter'    => $letter,
+        'results'   => $scores,
+        'penalties' => $data['currentRound']['penalties'] ?? [],
+    ];
+    $data['status'] = $gameover ? 'gameover' : 'results';
+    $data['currentLetter'] = null;
+    $data['currentRound'] = null;
+    return true;
+}
+
+// Geri sayım dolduysa oyunu bitir
+function maybe_finalize(string $room): void
+{
+    with_room($room, false, function (array &$data) {
+        if (($data['status'] ?? '') !== 'round' || empty($data['currentRound']['finishAt'])) {
+            return false;
+        }
+        if (time() < $data['currentRound']['finishAt']) {
+            return false;
+        }
+        // sadece TURU bitir (oyun devam eder, sonuç ekranına geç)
+        return finalize_round($data, false) ? ['ok' => true] : false;
+    });
+}
+
+// Oyuncu tur sırasında ekrandan ayrılırsa 10 puan ceza
+function handle_penalty(string $room, string $token): void
+{
+    with_room($room, false, function (array &$data) use ($token) {
+        if (!isset($data['players'][$token])) return false;
+        if (($data['status'] ?? '') !== 'round') return false; // sadece tur sırasında
+        $data['players'][$token]['score'] -= 10;
+        $data['players'][$token]['penaltyTotal'] = ($data['players'][$token]['penaltyTotal'] ?? 0) + 10;
+        if (!isset($data['currentRound']['penalties'])) $data['currentRound']['penalties'] = [];
+        $data['currentRound']['penalties'][$token] = ($data['currentRound']['penalties'][$token] ?? 0) + 10;
+        return ['ok' => true];
+    });
+    json_out(['ok' => true]);
+}
+
+// Oyuncu tüm 6 kategoriyi doldurunca "Bitir" -> 10 sn geri sayım başlatır
+function handle_start_finish(string $room, string $token): void
+{
+    $res = with_room($room, false, function (array &$data) use ($token) {
+        if (!isset($data['players'][$token])) return false;
+        if (($data['status'] ?? '') !== 'round' || empty($data['currentRound'])) return false;
+        if (!empty($data['currentRound']['finishAt'])) return ['ok' => true]; // zaten başladı
+        $ans = $data['currentRound']['answers'][$token] ?? [];
+        foreach (CATEGORIES as $c) {
+            if (trim((string) ($ans[$c] ?? '')) === '') {
+                return ['ok' => false, 'msg' => 'Önce tüm kategorileri doldur.'];
+            }
+        }
+        $data['currentRound']['finishAt'] = time() + 10;
+        $data['currentRound']['finishBy'] = $data['players'][$token]['name'];
+        return ['ok' => true];
+    });
+    if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    if ($res === false) json_out(['ok' => false, 'error' => 'Geçersiz işlem'], 400);
+    json_out($res);
+}
+
+function handle_save_answer(string $room, string $token): void
+{
+    $category = (string) inp('category', '');
+    $value    = (string) inp('value', '');
+    if (!in_array($category, CATEGORIES, true)) {
+        json_out(['ok' => false, 'error' => 'Geçersiz kategori'], 400);
+    }
+    if (mb_strlen($value) > 60) {
+        $value = mb_substr($value, 0, 60);
+    }
+
+    $res = with_room($room, false, function (array &$data) use ($token, $category, $value) {
+        if (!isset($data['players'][$token])) {
+            return false;
+        }
+        if ($data['status'] !== 'round' || empty($data['currentRound'])) {
+            return false;
+        }
+        if (!isset($data['currentRound']['answers'][$token])) {
+            $data['currentRound']['answers'][$token] = [];
+        }
+        $data['currentRound']['answers'][$token][$category] = $value;
+        return ['saved' => true];
+    });
+
+    if ($res === null || $res === false) {
+        json_out(['ok' => false, 'error' => 'Cevap kaydedilemedi'], 400);
+    }
+    json_out(['ok' => true]);
+}
+
+// Kısa baloncuk mesajı gönder.
+function handle_send_message(string $room, string $token): void
+{
+    $text = trim((string) inp('text', ''));
+    if ($text === '') {
+        json_out(['ok' => false, 'error' => 'Boş mesaj'], 400);
+    }
+    if (mb_strlen($text) > 80) {
+        $text = mb_substr($text, 0, 80);
+    }
+
+    $res = with_room($room, false, function (array &$data) use ($token, $text) {
+        if (!isset($data['players'][$token])) {
+            return false;
+        }
+        if (!isset($data['messages'])) $data['messages'] = [];
+        if (!isset($data['msgSeq'])) $data['msgSeq'] = 0;
+        $data['msgSeq']++;
+        $data['messages'][] = [
+            'id'   => $data['msgSeq'],
+            'name' => $data['players'][$token]['name'],
+            'text' => $text,
+            'ts'   => time(),
+        ];
+        // sadece son 20 saniyeyi ve en çok 30 mesajı tut
+        $cut = time() - 20;
+        $data['messages'] = array_values(array_filter($data['messages'], fn($m) => $m['ts'] >= $cut));
+        if (count($data['messages']) > 30) {
+            $data['messages'] = array_slice($data['messages'], -30);
+        }
+        return ['ok' => true];
+    });
+
+    if ($res === null || $res === false) {
+        json_out(['ok' => false, 'error' => 'Mesaj gönderilemedi'], 400);
+    }
+    json_out(['ok' => true]);
+}
+
+// Admin sonuç ekranında bir cevabı iptal eder/geri alır (toggle) ve puanları yeniden hesaplar.
+function handle_invalidate(string $room, string $token): void
+{
+    $pid = (string) inp('pid', '');
+    $category = (string) inp('category', '');
+    if (!in_array($category, CATEGORIES, true)) {
+        json_out(['ok' => false, 'error' => 'Geçersiz kategori'], 400);
+    }
+
+    $res = with_room($room, false, function (array &$data) use ($token, $pid, $category) {
+        if (($data['adminToken'] ?? null) !== $token) return false;
+        if (empty($data['rounds'])) return false;
+
+        $li = count($data['rounds']) - 1;
+        $round = &$data['rounds'][$li];
+        $letter = $round['letter'];
+
+        // pid -> token
+        $target = null;
+        foreach ($data['players'] as $tok => $p) {
+            if (($p['pid'] ?? '') === $pid) { $target = $tok; break; }
+        }
+        if ($target === null) return false;
+
+        if (!isset($round['invalid'])) $round['invalid'] = [];
+        $cur = !empty($round['invalid'][$target][$category]);
+        if ($cur) {
+            unset($round['invalid'][$target][$category]);
+            if (empty($round['invalid'][$target])) unset($round['invalid'][$target]);
+        } else {
+            $round['invalid'][$target][$category] = true;
+        }
+
+        // cevapları sonuçlardan topla
+        $answers = [];
+        foreach ($round['results'] as $tk => $r) {
+            $answers[$tk] = $r['answers'] ?? [];
+        }
+        // eski tur puanlarını kümülatiften düş
+        foreach ($round['results'] as $tk => $r) {
+            if (isset($data['players'][$tk])) $data['players'][$tk]['score'] -= ($r['points'] ?? 0);
+        }
+        // yeniden hesapla ve geri ekle
+        $newRes = compute_scores($data['players'], $answers, $letter, $round['invalid']);
+        foreach ($newRes as $tk => $r) {
+            if (isset($data['players'][$tk])) $data['players'][$tk]['score'] += $r['points'];
+        }
+        $round['results'] = $newRes;
+        return ['ok' => true];
+    });
+
+    if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    if ($res === false) json_out(['ok' => false, 'error' => 'Yetkisiz veya geçersiz işlem'], 403);
+    json_out($res);
+}
+
+// Oyuncu/admin çıkışı.
+// Çıkan oyuncu listeden silinir. Eğer çıkan admin ise yetki kalan en eski
+// oyuncuya devredilir; kimse kalmazsa oda silinir.
+function handle_leave(string $room, string $token): void
+{
+    if (!valid_room($room)) {
+        json_out(['ok' => true]);
+    }
+    $file = room_file($room);
+    if (!is_file($file)) {
+        json_out(['ok' => true, 'reset' => true]);
+    }
+    $fh = fopen($file, 'c+');
+    if ($fh === false) {
+        json_out(['ok' => true]);
+    }
+    flock($fh, LOCK_EX);
+    $raw = stream_get_contents($fh);
+    $data = json_decode((string) $raw, true);
+    if (!is_array($data)) {
+        flock($fh, LOCK_UN);
+        fclose($fh);
+        json_out(['ok' => true]);
+    }
+
+    $wasAdmin = (($data['adminToken'] ?? null) === $token);
+    unset($data['players'][$token]);
+
+    if ($wasAdmin) {
+        if (empty($data['players'])) {
+            // kimse kalmadı -> odayı sil
+            flock($fh, LOCK_UN);
+            fclose($fh);
+            @unlink($file);
+            json_out(['ok' => true, 'reset' => true]);
+        }
+        // yetkiyi kalan en eski oyuncuya devret
+        $data['adminToken'] = pick_new_admin($data['players'], time());
+    }
+
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+    fflush($fh);
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    json_out(['ok' => true]);
+}
+
+// Admin'in tek-buton aksiyonları
+function handle_admin_simple(string $room, string $token, string $op): void
+{
+    $res = with_room($room, false, function (array &$data) use ($token, $op) {
+        if (($data['adminToken'] ?? null) !== $token) {
+            return false; // sadece admin
+        }
+        switch ($op) {
+            case 'start_slot':
+                $data['status'] = 'slot';
+                $data['currentLetter'] = null;
+                return ['ok' => true];
+
+            case 'spin':
+                if ($data['status'] !== 'slot') return false;
+                $remaining = array_values(array_diff(LETTERS, $data['usedLetters']));
+                if (count($remaining) === 0) {
+                    return ['ok' => false, 'msg' => 'Tüm harfler kullanıldı'];
+                }
+                $data['currentLetter'] = $remaining[random_int(0, count($remaining) - 1)];
+                return ['ok' => true, 'letter' => $data['currentLetter']];
+
+            case 'approve':
+                if ($data['status'] !== 'slot' || empty($data['currentLetter'])) return false;
+                $letter = $data['currentLetter'];
+                if (!in_array($letter, $data['usedLetters'], true)) {
+                    $data['usedLetters'][] = $letter;
+                }
+                $data['status'] = 'round';
+                $data['currentRound'] = ['letter' => $letter, 'answers' => []];
+                return ['ok' => true];
+
+            case 'skip':
+                if ($data['status'] !== 'slot') return false;
+                $remaining = array_values(array_diff(LETTERS, $data['usedLetters']));
+                if (count($remaining) === 0) {
+                    return ['ok' => false, 'msg' => 'Tüm harfler kullanıldı'];
+                }
+                $data['currentLetter'] = $remaining[random_int(0, count($remaining) - 1)];
+                return ['ok' => true, 'letter' => $data['currentLetter']];
+
+            case 'end_round':
+                return finalize_round($data, false) ? ['ok' => true] : false;
+
+            case 'new_round':
+                $remaining = array_values(array_diff(LETTERS, $data['usedLetters']));
+                if (count($remaining) === 0) {
+                    return ['ok' => false, 'msg' => 'Tüm harfler bitti, oyun tamamlandı.'];
+                }
+                $data['status'] = 'slot';
+                $data['currentLetter'] = null;
+                $data['currentRound'] = null;
+                return ['ok' => true];
+
+            case 'to_lobby':
+                // mevcut slot/turu iptal et, lobiye dön (çıkan oyuncular tekrar girebilir)
+                $data['status'] = 'lobby';
+                $data['currentLetter'] = null;
+                $data['currentRound'] = null;
+                return ['ok' => true];
+
+            case 'end_game':
+                // oyunu tamamen bitir -> final skor tablosu
+                if (($data['status'] ?? '') === 'round') {
+                    finalize_round($data, true); // açık turu puanla + gameover
+                } else {
+                    $data['status'] = 'gameover';
+                    $data['currentLetter'] = null;
+                    $data['currentRound'] = null;
+                }
+                return ['ok' => true];
+
+            case 'new_game':
+                // oyunu sıfırla, oyuncuları koru, skorları sıfırla
+                foreach ($data['players'] as $tok => $p) {
+                    $data['players'][$tok]['score'] = 0;
+                    $data['players'][$tok]['penaltyTotal'] = 0;
+                }
+                $data['status'] = 'lobby';
+                $data['usedLetters'] = [];
+                $data['currentLetter'] = null;
+                $data['currentRound'] = null;
+                $data['rounds'] = [];
+                $data['messages'] = [];
+                return ['ok' => true];
+        }
+        return false;
+    });
+
+    if ($res === null) {
+        json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    }
+    if ($res === false) {
+        json_out(['ok' => false, 'error' => 'Yetkisiz veya geçersiz işlem'], 403);
+    }
+    json_out($res);
+}
+
+// ---- Durum oluşturucu (istemciye gönderilecek) ----
+function build_state(array $data, string $token): array
+{
+    $isAdmin = (($data['adminToken'] ?? null) === $token);
+    $remaining = count(array_values(array_diff(LETTERS, $data['usedLetters'])));
+
+    // Oyuncu listesi (token gizlenir, isim + skor + ben mi)
+    $players = [];
+    foreach ($data['players'] as $tok => $p) {
+        $players[] = [
+            'name'    => $p['name'],
+            'score'   => $p['score'],
+            'isMe'    => ($tok === $token),
+            'isAdmin' => ($tok === ($data['adminToken'] ?? null)),
+        ];
+    }
+
+    $state = [
+        'room'          => $data['room'],
+        'status'        => $data['status'],
+        'isAdmin'       => $isAdmin,
+        'isMember'      => isset($data['players'][$token]),
+        'currentLetter' => $data['currentLetter'] ?? null,
+        'usedLetters'   => $data['usedLetters'],
+        'remaining'     => $remaining,
+        'categories'    => array_map(fn($c) => ['key' => $c, 'label' => CATEGORY_LABELS[$c]], CATEGORIES),
+        'playerCount'   => count($data['players']),
+        'players'       => $players,
+        'roundsPlayed'  => count($data['rounds'] ?? []),
+    ];
+
+    // Tur sırasında: yalnızca KENDİ cevapların; başkalarının doldurma adedi
+    if ($data['status'] === 'round' && !empty($data['currentRound'])) {
+        $finishAt = $data['currentRound']['finishAt'] ?? null;
+        $state['round'] = [
+            'letter'    => $data['currentRound']['letter'],
+            'myAnswers' => $data['currentRound']['answers'][$token] ?? [],
+            'progress'  => [],
+            'finishIn'  => $finishAt ? max(0, $finishAt - time()) : null,
+            'finishBy'  => $data['currentRound']['finishBy'] ?? null,
+        ];
+        // ad => dolu kategori adedi
+        $prog = [];
+        foreach ($data['players'] as $tok => $p) {
+            $ans = $data['currentRound']['answers'][$tok] ?? [];
+            $filled = 0;
+            foreach (CATEGORIES as $c) {
+                if (trim((string)($ans[$c] ?? '')) !== '') $filled++;
+            }
+            $prog[] = ['name' => $p['name'], 'filled' => $filled, 'total' => count(CATEGORIES)];
+        }
+        $state['round']['progress'] = $prog;
+    }
+
+    // Sonuç ekranı: son turun tüm cevapları + puanları (isim bazlı)
+    if ($data['status'] === 'results' && !empty($data['rounds'])) {
+        $last = $data['rounds'][count($data['rounds']) - 1];
+        $inv = $last['invalid'] ?? [];
+        $pens = $last['penalties'] ?? [];
+        $rows = [];
+        foreach ($last['results'] as $tok => $r) {
+            $invRow = [];
+            foreach (CATEGORIES as $c) {
+                $invRow[$c] = !empty($inv[$tok][$c]);
+            }
+            $rows[] = [
+                'name'      => $data['players'][$tok]['name'] ?? '—',
+                'pid'       => $data['players'][$tok]['pid'] ?? '',
+                'answers'   => $r['answers'],
+                'breakdown' => $r['breakdown'],
+                'invalid'   => $invRow,
+                'points'    => $r['points'],
+                'penalty'   => $pens[$tok] ?? 0,
+            ];
+        }
+        // puana göre sırala
+        usort($rows, fn($a, $b) => $b['points'] <=> $a['points']);
+        $state['results'] = [
+            'letter' => $last['letter'],
+            'rows'   => $rows,
+        ];
+    }
+
+    // Genel skor tablosu (kümülatif), her durumda
+    $board = [];
+    foreach ($data['players'] as $tok => $p) {
+        $board[] = ['name' => $p['name'], 'score' => $p['score'], 'penalty' => $p['penaltyTotal'] ?? 0];
+    }
+    usort($board, fn($a, $b) => $b['score'] <=> $a['score']);
+    $state['scoreboard'] = $board;
+
+    // Son baloncuk mesajları (son 20 sn)
+    $cut = time() - 20;
+    $msgs = array_values(array_filter($data['messages'] ?? [], fn($m) => ($m['ts'] ?? 0) >= $cut));
+    $state['messages'] = $msgs;
+
+    return $state;
+}
