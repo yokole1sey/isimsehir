@@ -172,8 +172,9 @@ function handle_join(string $room): void
 function handle_state(string $room, string $token): void
 {
     $res = with_room($room, false, function (array &$data) use ($token) {
-        // Atılmış oyuncu kontrolü
+        // Atılmış oyuncu kontrolü — listeden de sil
         if (isset($data['players'][$token]) && !empty($data['players'][$token]['kicked'])) {
+            unset($data['players'][$token]);
             return ['kicked' => true];
         }
         // yoklama: bu oyuncunun "son görülme"si
@@ -206,6 +207,11 @@ function reconcile_room(array &$data): void
     $now = time();
     // uzun süredir görünmeyen oyuncuları çıkar, puanlarını sakla
     foreach ($data['players'] as $tok => $p) {
+        // Kicked oyuncuyu anında at (puan kaydetme, zaten yasaklı)
+        if (!empty($p['kicked'])) {
+            unset($data['players'][$tok]);
+            continue;
+        }
         $ls = $p['lastSeen'] ?? ($p['joinedAt'] ?? $now);
         if ($now - $ls > PLAYER_TIMEOUT) {
             // İsme göre puanı sakla (geri dönünce restore edilsin)
@@ -780,8 +786,10 @@ function handle_kick(string $room, string $token): void
         if (!in_array($name, $data['banned'], true)) {
             $data['banned'][] = $name;
         }
-        // Oyuncuyu işaretle (kicked flag), sonraki poll'da fark edecek
+        // Kicked flag koy (oyuncu kendi poll'unda mesajı görsün) ama aynı zamanda
+        // listeden kısa sürede silineceği için görünürlük sorununu da çöz.
         $data['players'][$targetTok]['kicked'] = true;
+        $data['players'][$targetTok]['lastSeen'] = 0; // reconcile hemen düşürsün
         return ['ok' => true, 'kicked' => $name];
     });
     if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
