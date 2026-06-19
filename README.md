@@ -18,6 +18,7 @@ Saf **PHP** ile yazıldı, küçük durum verileri için **JSON** kullanır — 
 - ⏱️ **"Bitirdim" + 15 sn** — İlk bitiren turu kapatır, diğerlerine 15 sn süre tanır.
 - 🚫 **Hile önleme** — Tur sırasında ekrandan ayrılan (sekme/uygulama değiştiren) oyuncu **10 puan ceza** alır.
 - 🛠️ **Admin araçları** — Hatalı/tek harf cevapları iptal etme, turu/oyunu bitirme, lobiye dönme.
+- 🚫 **Oyuncu atma & oda kilitleme** — Admin istenmeyen oyuncuyu odadan atabilir (isim + cihaz ID ile yeniden giriş engellenir) ve odayı yeni oyunculara kapatabilir.
 - 🚩 **Cevap bildirme** — Oyuncular hatalı cevapları bildirebilir; bildirilen cevaplar admin ekranında renk değiştirir.
 - 💬 **Gerçek zamanlı sohbet** — Oyun sırasında ve turlar arasında FAB butonu ile açılır. Emoji desteği, kişi renkleri, mesaj geçmişi (sayfa yenilemede korunur). Masaüstünde sağ kenarda sabit panel, mobilde tam ekran.
 - 💬 **Lobi baloncukları** — Lobide kısa mesaj + hızlı emoji; ekran ortasında süzülerek yükselir.

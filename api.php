@@ -67,12 +67,17 @@ function handle_join(string $room): void
         json_out(['ok' => false, 'error' => 'Geçerli bir takma ad girin (1-24 karakter).'], 400);
     }
 
+    $deviceId = trim((string) inp('deviceId', ''));
     $myToken = gen_token();
-    $result = with_room($room, true, function (array &$data) use ($name, $myToken) {
+    $result = with_room($room, true, function (array &$data) use ($name, $myToken, $deviceId) {
         $now = time();
         // Yasaklı isim kontrolü
         $banned = $data['banned'] ?? [];
         if (in_array($name, $banned, true)) {
+            return ['banned' => true];
+        }
+        // Yasaklı cihaz ID kontrolü
+        if ($deviceId !== '' && in_array($deviceId, $data['bannedDevices'] ?? [], true)) {
             return ['banned' => true];
         }
         // Kilitli oda kontrolü (odada oyuncu varsa kilitli olabilir)
@@ -147,6 +152,7 @@ function handle_join(string $room): void
             'joinedAt'     => time(),
             'lastSeen'     => time(),
             'pid'          => bin2hex(random_bytes(4)),
+            'deviceId'     => $deviceId,
         ];
         return ['isAdmin' => $isAdmin];
     });
@@ -172,7 +178,11 @@ function handle_join(string $room): void
 function handle_state(string $room, string $token): void
 {
     $res = with_room($room, false, function (array &$data) use ($token) {
-        // Atılmış oyuncu kontrolü — listeden de sil
+        // Atılmış oyuncu kontrolü (players'dan silinmiş olabilir, kickedTokens'a bak)
+        if (!empty($data['kickedTokens'][$token])) {
+            unset($data['kickedTokens'][$token]);
+            return ['kicked' => true];
+        }
         if (isset($data['players'][$token]) && !empty($data['players'][$token]['kicked'])) {
             unset($data['players'][$token]);
             return ['kicked' => true];
@@ -207,11 +217,7 @@ function reconcile_room(array &$data): void
     $now = time();
     // uzun süredir görünmeyen oyuncuları çıkar, puanlarını sakla
     foreach ($data['players'] as $tok => $p) {
-        // Kicked oyuncuyu anında at (puan kaydetme, zaten yasaklı)
-        if (!empty($p['kicked'])) {
-            unset($data['players'][$tok]);
-            continue;
-        }
+
         $ls = $p['lastSeen'] ?? ($p['joinedAt'] ?? $now);
         if ($now - $ls > PLAYER_TIMEOUT) {
             // İsme göre puanı sakla (geri dönünce restore edilsin)
@@ -781,15 +787,24 @@ function handle_kick(string $room, string $token): void
         if (!isset($data['players'][$targetTok])) return false;
         if ($targetTok === $token) return false; // kendini atamazsın
         $name = $data['players'][$targetTok]['name'];
-        // Yasaklı listeye ekle
+        // İsmi yasakla
         if (!isset($data['banned'])) $data['banned'] = [];
         if (!in_array($name, $data['banned'], true)) {
             $data['banned'][] = $name;
         }
-        // Kicked flag koy (oyuncu kendi poll'unda mesajı görsün) ama aynı zamanda
-        // listeden kısa sürede silineceği için görünürlük sorununu da çöz.
-        $data['players'][$targetTok]['kicked'] = true;
-        $data['players'][$targetTok]['lastSeen'] = 0; // reconcile hemen düşürsün
+        // Cihaz ID'sini yasakla
+        $devId = $data['players'][$targetTok]['deviceId'] ?? '';
+        if ($devId !== '') {
+            if (!isset($data['bannedDevices'])) $data['bannedDevices'] = [];
+            if (!in_array($devId, $data['bannedDevices'], true)) {
+                $data['bannedDevices'][] = $devId;
+            }
+        }
+        // Token'ı ayrı kickedTokens listesine ekle (players'dan silinse bile bildirim gidebilsin)
+        if (!isset($data['kickedTokens'])) $data['kickedTokens'] = [];
+        $data['kickedTokens'][$targetTok] = true;
+        // players'dan hemen sil
+        unset($data['players'][$targetTok]);
         return ['ok' => true, 'kicked' => $name];
     });
     if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);

@@ -250,7 +250,7 @@
         s.categories.map(c => (r.invalid && r.invalid[c.key]) ? '1' : '0').join('') + ':' +
         s.categories.map(c => (r.reports && r.reports[c.key]) || 0).join('')).join(',');
     }
-    const sig = [s.status, letter, s.playerCount, s.isAdmin, extra].join('|');
+    const sig = [s.status, letter, s.playerCount, s.isAdmin, s.locked ? '1' : '0', extra].join('|');
 
     if (sig !== viewSig) {
       viewSig = sig;
@@ -942,8 +942,10 @@
     let html = '<h3>Skor Tablosu</h3><ol class="board">';
     (s.players || []).forEach((p, i) => {
       const pen = p.penalty ? '<span class="bpen">-' + p.penalty + '</span>' : '';
-      const kickBtn = (s.isAdmin && !p.isMe)
-        ? '<button class="kick-btn" data-tok="' + esc(p.tok || '') + '" data-name="' + esc(p.name) + '" title="Oyuncuyu at">✕</button>'
+      const kickBtn = s.isAdmin
+        ? (p.isMe
+            ? '<span class="kick-placeholder"></span>'
+            : '<button class="kick-btn" data-tok="' + esc(p.tok || '') + '" data-name="' + esc(p.name) + '" title="Oyuncuyu at">✕</button>')
         : '';
       html += '<li><span class="rank">' + (i + 1) + '</span><span class="bn">' + esc(p.name) +
         '</span>' + pen + '<span class="bs">' + p.score + '</span>' + kickBtn + '</li>';

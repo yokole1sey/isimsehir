@@ -12,7 +12,7 @@ if (!valid_room($room)) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oda <?= htmlspecialchars($room) ?> — İsim Şehir</title>
-<link rel="stylesheet" href="assets/style.css?v=34">
+<link rel="stylesheet" href="assets/style.css?v=35">
 </head>
 <body>
 <header class="topbar">
@@ -47,6 +47,6 @@ if (!valid_room($room)) {
 window.IS_ROOM = <?= json_encode($room) ?>;
 window.IS_LETTERS = <?= json_encode(LETTERS, JSON_UNESCAPED_UNICODE) ?>;
 </script>
-<script src="assets/app.js?v=44"></script>
+<script src="assets/app.js?v=45"></script>
 </body>
 </html>

@@ -441,6 +441,13 @@ roomInput.addEventListener('input', () => {
 });
 
 // Form submit
+// Cihaz kimliği: ilk ziyarette üretilir, localStorage'da kalır
+let deviceId = localStorage.getItem('is_device_id');
+if (!deviceId) {
+  deviceId = 'dev_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  localStorage.setItem('is_device_id', deviceId);
+}
+
 const form = document.getElementById('joinForm');
 const err  = document.getElementById('err');
 const btn  = document.getElementById('joinBtn');
@@ -470,7 +477,7 @@ form.addEventListener('submit', async (e) => {
     const res = await fetch('api.php?action=join', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({room, name})
+      body: JSON.stringify({room, name, deviceId})
     });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'Bir hata oluştu.');
