@@ -35,10 +35,12 @@
           sendPenalty();
         }
       }
-    } else if (penaltyPending) {
-      penaltyPending = false;
-      toast('Ekrandan ayrıldın — 10 puan ceza! ⚠️');
-      poll();
+    } else {
+      if (penaltyPending) {
+        penaltyPending = false;
+        toast('Ekrandan ayrıldın — 10 puan ceza! ⚠️');
+      }
+      poll(); // her dönüşte lastSeen güncelle
     }
   });
 
@@ -61,6 +63,10 @@
   let penaltyPending = false; // ekran terkinde ceza gönderildi, dönünce uyar
   let lastHideAt = 0;         // tekrarlı tetiklemeyi engelle
   let wasAdmin = null;        // admin devri bildirimi için
+  let chatOpen = false;
+  let unreadCount = 0;
+  const CHAT_KEY = 'is_chat_' + ROOM;
+  let chatHistory = JSON.parse(sessionStorage.getItem(CHAT_KEY) || '[]');
 
   // Baloncuk overlay (tüm ekranı kaplar, tıklamayı geçirir)
   const bubbleLayer = document.createElement('div');
@@ -173,16 +179,43 @@
   }
 
   // ---- Çıkış ----
+  async function doLeave() {
+    closing = true;
+    try { await api('leave'); } catch (_) {}
+    localStorage.removeItem('is_token_' + ROOM);
+    location.href = 'index.php';
+  }
+
+  function confirmLeave() {
+    modalConfirm('Oyundan çıkmak istediğine emin misin? Puanların korunur, geri dönebilirsin.', doLeave);
+  }
+
   const leaveBtn = document.getElementById('leaveBtn');
   if (leaveBtn) {
-    leaveBtn.addEventListener('click', async (e) => {
+    leaveBtn.addEventListener('click', (e) => {
       e.preventDefault();
-      closing = true;
-      try { await api('leave'); } catch (_) {}
-      localStorage.removeItem('is_token_' + ROOM);
-      location.href = 'index.php';
+      confirmLeave();
     });
   }
+
+  // Tarayıcı kapat / sekme kapat / adres barından git → native uyarı
+  window.addEventListener('beforeunload', (e) => {
+    if (!closing) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+
+  // Geri tuşu: sohbet açıksa kapat, değilse çıkış onayı sor
+  history.pushState({ game: true }, '');
+  window.addEventListener('popstate', () => {
+    history.pushState({ game: true }, '');
+    if (chatOpen) {
+      closeChat();
+      return;
+    }
+    confirmLeave();
+  });
 
   // ---- Render ----
   function render(s) {
@@ -192,13 +225,21 @@
       toast('Yönetici (admin) sen oldun 👑');
     }
     wasAdmin = s.isAdmin;
+    // Lobide FAB gizle, diğer ekranlarda göster
+    if (s.status === 'lobby') {
+      chatFab.style.display = 'none';
+      if (chatOpen) closeChat();
+    } else {
+      chatFab.style.display = '';
+    }
     // Ana panel imzası: status + harf + oyuncu sayısı + admin mi
     const letter = (s.round && s.round.letter) || s.currentLetter || '';
     let extra = '';
     if (s.status === 'results' && s.results) {
       // puanlar/iptaller değişince sonuç ekranını yeniden çiz
       extra = s.results.rows.map(r => r.points + ':' +
-        s.categories.map(c => (r.invalid && r.invalid[c.key]) ? '1' : '0').join('')).join(',');
+        s.categories.map(c => (r.invalid && r.invalid[c.key]) ? '1' : '0').join('') + ':' +
+        s.categories.map(c => (r.reports && r.reports[c.key]) || 0).join('')).join(',');
     }
     const sig = [s.status, letter, s.playerCount, s.isAdmin, extra].join('|');
 
@@ -211,25 +252,152 @@
     processMessages(s);
   }
 
-  // Yeni mesajları baloncuk olarak göster
+  // Yeni mesajları baloncuk + panel geçmişine ekle
   function processMessages(s) {
     const msgs = s.messages || [];
     if (lastMsgId === null) {
-      // ilk yükleme: eski mesajları toplu göstermemek için baz al
       lastMsgId = msgs.reduce((m, x) => Math.max(m, x.id), 0);
+      // ilk yükleme: geçmişe ekle ama baloncuk çıkarma
+      msgs.forEach(m => {
+        if (!chatHistory.find(x => x.id === m.id)) chatHistory.push(m);
+      });
+      if (chatHistory.length > 60) chatHistory = chatHistory.slice(-60);
+      sessionStorage.setItem(CHAT_KEY, JSON.stringify(chatHistory));
+      if (chatOpen) renderChatHistory();
       return;
     }
     msgs.forEach(m => {
       if (m.id > lastMsgId) {
-        spawnBubble(m.name, m.text);
+        if (lastState && lastState.status === 'lobby') spawnBubble(m.name, m.text);
         lastMsgId = m.id;
+        chatHistory.push(m);
+        if (chatHistory.length > 60) chatHistory = chatHistory.slice(-60);
+        sessionStorage.setItem(CHAT_KEY, JSON.stringify(chatHistory));
+        if (chatOpen) {
+          renderChatHistory();
+        } else {
+          unreadCount++;
+          updateBadge();
+        }
       }
     });
   }
 
+  // ---- FAB Sohbet Paneli ----
+  const chatFab   = document.getElementById('chatFab');
+  const chatPanel = document.getElementById('chatPanel');
+  const chatBadge = document.getElementById('chatBadge');
+  const chatClose = document.getElementById('chatClose');
+  const cpMsgs    = document.getElementById('cpMsgs');
+  const cpInput   = document.getElementById('cpInput');
+  const cpSend    = document.getElementById('cpSend');
+  const cpEmoji   = document.getElementById('cpEmoji');
+
+  const EMOJIS = ['👍','😂','🔥','❤️','😮','👏','🎉','🤔','😎','🙌','😠','🤮'];
+  EMOJIS.forEach(em => {
+    const b = el('<button class="emoji-btn" type="button">' + em + '</button>');
+    b.onclick = async () => {
+      cpEmoji.classList.remove('cp-emoji-open');
+      try { await api('send_message', { text: em }); poll(); } catch (_) {}
+    };
+    cpEmoji.appendChild(b);
+  });
+
+  function updateBadge() {
+    if (unreadCount > 0) {
+      chatBadge.textContent = unreadCount > 9 ? '9+' : unreadCount;
+      chatBadge.hidden = false;
+    } else {
+      chatBadge.hidden = true;
+    }
+  }
+
+  function renderChatHistory() {
+    if (!cpMsgs) return;
+    cpMsgs.innerHTML = '';
+    [...chatHistory].reverse().forEach(m => {
+      const emojiOnly = isEmojiOnly(m.text);
+      const isMe = m.name === myName;
+      const h = nameHue(m.name);
+      const color = 'hsl(' + h + ',70%,62%)';
+      const classes = ['cp-msg'];
+      if (emojiOnly) classes.push('cp-emoji-only');
+      if (isMe) classes.push('cp-me');
+      const div = el('<div class="' + classes.join(' ') + '"></div>');
+      const bubble = el('<div class="cp-bubble' + (emojiOnly ? ' cp-bubble-emoji' : '') + '"></div>');
+      // İsim her mesajda göster (emoji dahil), kendi mesajında gösterme
+      if (!isMe) {
+        const nameEl = el('<span class="cp-name"></span>');
+        nameEl.textContent = m.name;
+        nameEl.style.color = color;
+        bubble.appendChild(nameEl);
+      }
+      if (!emojiOnly) {
+        if (isMe) {
+          bubble.style.background = 'linear-gradient(135deg, hsl(' + h + ',65%,38%), hsl(' + ((h+40)%360) + ',65%,43%))';
+          bubble.style.color = '#fff';
+        } else {
+          bubble.style.background = 'hsla(' + h + ',55%,50%,.15)';
+          bubble.style.border = '1px solid hsla(' + h + ',55%,50%,.3)';
+        }
+      }
+      const txt = el('<span class="cp-text"></span>');
+      txt.textContent = m.text;
+      bubble.appendChild(txt);
+      div.appendChild(bubble);
+      cpMsgs.appendChild(div);
+    });
+  }
+
+  // Emoji satırı toggle
+  const cpEmojiToggle = el('<button class="cp-emoji-toggle" type="button" title="Emoji">😊</button>');
+  const cpRow = document.getElementById('cpInput').closest('.cp-row');
+  cpRow.insertBefore(cpEmojiToggle, cpRow.firstChild);
+
+  // Arkaplan overlay tıklamasıyla kapat
+  chatPanel.addEventListener('click', (e) => {
+    if (e.target === chatPanel) closeChat();
+  });
+  cpEmojiToggle.addEventListener('click', () => {
+    cpEmoji.classList.toggle('cp-emoji-open');
+  });
+
+  function openChat() {
+    chatOpen = true;
+    unreadCount = 0;
+    updateBadge();
+    chatPanel.classList.add('cp-open');
+    renderChatHistory();
+    setTimeout(() => cpInput.focus(), 80);
+  }
+
+  function closeChat() {
+    chatOpen = false;
+    chatPanel.classList.remove('cp-open');
+    cpEmoji.classList.remove('cp-emoji-open');
+  }
+
+  document.getElementById('chatClear').addEventListener('click', () => {
+    chatHistory = [];
+    sessionStorage.removeItem(CHAT_KEY);
+    cpMsgs.innerHTML = '';
+  });
+
+  chatFab.addEventListener('click', () => chatOpen ? closeChat() : openChat());
+  chatClose.addEventListener('click', closeChat);
+
+  const cpDoSend = async () => {
+    const text = cpInput.value.trim();
+    if (!text) return;
+    cpInput.value = '';
+    try { await api('send_message', { text }); poll(); } catch (_) {}
+  };
+  cpSend.addEventListener('click', cpDoSend);
+  cpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') cpDoSend(); });
+
   // Baloncukları sıraya al: aynı anda gelenler üst üste binmesin diye
   // farklı şeritlerden, ~320ms arayla gönderilir.
-  const bubbleLanes = [12, 26, 40, 54, 68, 82]; // ekran genişliği yüzdesi
+  const bubbleLanes = [40, 46, 50, 54, 60]; // sadece orta bölge, kenarlardan uzak
   let bubbleLaneIdx = Math.floor(Math.random() * bubbleLanes.length);
   let bubbleQueue = [];
   let bubbleTimer = null;
@@ -255,13 +423,14 @@
 
   function createBubble(name, text) {
     const emojiOnly = isEmojiOnly(text);
-    const inner = emojiOnly ? esc(text) : ('<span class="bn">' + esc(name) + '</span>' + esc(text));
+    // Uzun metinleri kırp — baloncukta max 35 karakter
+    const displayText = (!emojiOnly && text.length > 90) ? text.slice(0, 88) + '…' : text;
+    const inner = emojiOnly ? esc(displayText) : ('<span class="bn">' + esc(name) + '</span>' + esc(displayText));
     const b = el('<div class="bubble' + (emojiOnly ? ' emoji' : '') + '">' + inner + '</div>');
-    // şerit (sırayla) + küçük yatay jitter
     const lane = bubbleLanes[bubbleLaneIdx % bubbleLanes.length];
     bubbleLaneIdx++;
-    b.style.left = (lane + (Math.random() * 8 - 4)) + '%';
-    b.style.setProperty('--sway', (Math.random() * 40 - 20) + 'px');
+    b.style.left = lane + '%';
+    b.style.setProperty('--sway', (Math.random() * 16 - 8) + 'px');
     if (!emojiOnly) {
       const h = nameHue(name);
       b.style.background = 'linear-gradient(135deg, hsl(' + h + ',70%,52%), hsl(' + ((h + 40) % 360) + ',72%,58%))';
@@ -441,7 +610,7 @@
   }
 
   function onFinishClick() {
-    modalConfirm('Turu bitiriyorsun! 10 saniye geri sayım başlayacak, süre dolunca bu tur herkes için kapanır ve puanlanır. Emin misin?', async () => {
+    modalConfirm('Turu bitiriyorsun! 15 saniye geri sayım başlayacak, süre dolunca bu tur herkes için kapanır ve puanlanır. Emin misin?', async () => {
       try {
         await flushAnswers();
         const r = await api('start_finish');
@@ -491,6 +660,13 @@
         if (roundIdx < s.categories.length - 1) { roundIdx++; renderQA(s); }
       }
     };
+    input.addEventListener('focus', () => {
+      // Klavye açılınca nav butonları görünür kalsın
+      setTimeout(() => {
+        const nav = document.querySelector('.qa-nav');
+        if (nav) nav.scrollIntoView({ block: 'end', behavior: 'smooth' });
+      }, 350);
+    });
     card.appendChild(input);
     setTimeout(() => input.focus(), 30);
 
@@ -541,10 +717,49 @@
             '<span class="rc-ans">' + (esc(ans) || '—') + '</span>' +
             '<span class="rc-pts">' + (isInv ? 'iptal' : ('+' + pts)) + '</span></div>');
           // admin dolu cevapları iptal edip geri alabilir
+          const repCount = (row.reports && row.reports[c.key]) || 0;
+          const iReported = !!(row.myReports && row.myReports[c.key]);
+          if (repCount === 1 && !isInv) cell.classList.add('reported-1');
+          else if (repCount >= 2 && !isInv) cell.classList.add('reported-2');
+
           if (s.isAdmin && ans) {
             cell.classList.add('clickable');
             cell.title = isInv ? 'Tekrar geçerli say' : 'Bu cevabı iptal et';
+            if (repCount > 0 && !isInv) {
+              const flag = el('<span class="rep-badge" title="' + repCount + ' kişi bildirdi">🚩' + repCount + '</span>');
+              cell.appendChild(flag);
+            }
             cell.onclick = () => adminAction('invalidate_answer', { pid: row.pid, category: c.key });
+          } else if (!s.isAdmin && ans && !isInv) {
+            const isMe = row.name === myName;
+            if (!isMe) {
+              const flagBtn = el('<button class="rep-btn' + (iReported ? ' rep-active' : '') + '" title="' + (iReported ? 'Bildirimi geri al' : 'Hatalı olarak bildir') + '">' + (iReported ? '🚩' : '⚑') + '</button>');
+              flagBtn.onclick = async (e) => {
+                e.stopPropagation();
+                const nowReported = flagBtn.classList.contains('rep-active');
+                // Optimistic update
+                if (nowReported) {
+                  flagBtn.classList.remove('rep-active');
+                  flagBtn.textContent = '⚑';
+                  flagBtn.title = 'Hatalı olarak bildir';
+                  const newCount = repCount - 1;
+                  cell.classList.remove('reported-1', 'reported-2');
+                  if (newCount === 1) cell.classList.add('reported-1');
+                  else if (newCount >= 2) cell.classList.add('reported-2');
+                } else {
+                  flagBtn.classList.add('rep-active');
+                  flagBtn.textContent = '🚩';
+                  flagBtn.title = 'Bildirimi geri al';
+                  const newCount = repCount + 1;
+                  cell.classList.remove('reported-1', 'reported-2');
+                  if (newCount === 1) cell.classList.add('reported-1');
+                  else if (newCount >= 2) cell.classList.add('reported-2');
+                }
+                await api('report_answer', { pid: row.pid, category: c.key });
+                poll();
+              };
+              cell.appendChild(flagBtn);
+            }
           }
           grid.appendChild(cell);
         });
@@ -728,6 +943,30 @@
     return String(str == null ? '' : str)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ---- Mobil klavye tespiti (visualViewport) ----
+  if (window.visualViewport) {
+    let baseH = window.visualViewport.height;
+    window.visualViewport.addEventListener('resize', () => {
+      const vh = window.visualViewport.height;
+      const ratio = vh / baseH;
+      const kbOpen = ratio < 0.75; // klavye ekranın %25'inden fazlasını kapladı
+      if (kbOpen) {
+        // Chat panel yüksekliğini görünür alana sığdır
+        const panelH = Math.max(vh - 20, 200);
+        document.body.style.setProperty('--kb-panel-h', panelH + 'px');
+        document.body.classList.add('kb-open');
+      } else {
+        document.body.classList.remove('kb-open');
+      }
+    });
+    // İlk yükleme tabanını al
+    window.visualViewport.addEventListener('scroll', () => {
+      if (!document.body.classList.contains('kb-open')) {
+        baseH = window.visualViewport.height;
+      }
+    });
   }
 
   // Başlat

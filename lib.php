@@ -6,8 +6,8 @@ mb_internal_encoding('UTF-8');
 
 // Admin bu kadar saniye sessiz kalırsa yetki devredilir; oyuncu bu kadar
 // sessiz kalırsa listeden düşürülür.
-const ADMIN_TIMEOUT = 15;
-const PLAYER_TIMEOUT = 60;
+const ADMIN_TIMEOUT = 60;
+const PLAYER_TIMEOUT = 300; // 5 dakika
 
 const CATEGORIES = ['isim', 'sehir', 'bitki', 'hayvan', 'esya', 'artist'];
 const CATEGORY_LABELS = [
@@ -197,17 +197,24 @@ function compute_scores(array $players, array $answers, string $letter, array $i
             $val = $answers[$token][$cat] ?? '';
             $norm = normalize_answer((string) $val);
             $isInvalid = !empty($invalid[$token][$cat]);
-            $startsOk = !$isInvalid && $norm !== '' && fold_letter(mb_substr($norm, 0, 1, 'UTF-8')) === $letterFold;
+            $startsOk = !$isInvalid && mb_strlen($norm, 'UTF-8') >= 2 && fold_letter(mb_substr($norm, 0, 1, 'UTF-8')) === $letterFold;
             if ($startsOk) {
                 $key = answer_key($norm);
                 $valid[$token] = $key;
                 $counts[$key] = ($counts[$key] ?? 0) + 1;
             }
         }
+        $totalValid = count($valid); // bu kategoride geçerli cevap veren kişi sayısı
         foreach (array_keys($players) as $token) {
             $pts = 0;
             if (isset($valid[$token])) {
-                $pts = ($counts[$valid[$token]] > 1) ? 5 : 10;
+                if ($totalValid === 1) {
+                    $pts = 20; // tek doğru cevap veren
+                } elseif ($counts[$valid[$token]] > 1) {
+                    $pts = 5;  // aynı cevap başkasında da var
+                } else {
+                    $pts = 10; // benzersiz cevap
+                }
             }
             $results[$token]['breakdown'][$cat] = $pts;
             $results[$token]['points'] += $pts;
