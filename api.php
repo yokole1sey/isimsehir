@@ -41,6 +41,8 @@ try {
         case 'end_game':       handle_admin_simple($room, $token, 'end_game'); break;
         case 'to_lobby':       handle_admin_simple($room, $token, 'to_lobby'); break;
         case 'leave':          handle_leave($room, $token); break;
+        case 'kick':           handle_kick($room, $token); break;
+        case 'toggle_lock':    handle_toggle_lock($room, $token); break;
         case 'send_message':   handle_send_message($room, $token); break;
         case 'invalidate_answer': handle_invalidate($room, $token); break;
         case 'report_answer':     handle_report($room, $token); break;
@@ -67,8 +69,17 @@ function handle_join(string $room): void
 
     $myToken = gen_token();
     $result = with_room($room, true, function (array &$data) use ($name, $myToken) {
-        // Timeout olan oyuncuları join sırasında da temizle
         $now = time();
+        // Yasaklı isim kontrolü
+        $banned = $data['banned'] ?? [];
+        if (in_array($name, $banned, true)) {
+            return ['banned' => true];
+        }
+        // Kilitli oda kontrolü (odada oyuncu varsa kilitli olabilir)
+        if (!empty($data['locked']) && !empty($data['players'])) {
+            return ['locked' => true];
+        }
+        // Timeout olan oyuncuları join sırasında da temizle
         foreach ($data['players'] as $tok => $p) {
             $ls = $p['lastSeen'] ?? ($p['joinedAt'] ?? $now);
             if ($now - $ls > PLAYER_TIMEOUT) {
@@ -143,6 +154,12 @@ function handle_join(string $room): void
     if (!empty($result['blocked'])) {
         json_out(['ok' => false, 'error' => 'Bu odada oyun çoktan başlamış, şu an girilemez. Oyun bitince tekrar deneyin.'], 409);
     }
+    if (!empty($result['banned'])) {
+        json_out(['ok' => false, 'error' => 'Bu odaya girişiniz admin tarafından engellendi.'], 403);
+    }
+    if (!empty($result['locked'])) {
+        json_out(['ok' => false, 'error' => 'Bu oda kilitli, şu an yeni oyuncu kabul etmiyor.'], 403);
+    }
 
     json_out([
         'ok'      => true,
@@ -155,6 +172,10 @@ function handle_join(string $room): void
 function handle_state(string $room, string $token): void
 {
     $res = with_room($room, false, function (array &$data) use ($token) {
+        // Atılmış oyuncu kontrolü
+        if (isset($data['players'][$token]) && !empty($data['players'][$token]['kicked'])) {
+            return ['kicked' => true];
+        }
         // yoklama: bu oyuncunun "son görülme"si
         if (isset($data['players'][$token])) {
             $data['players'][$token]['lastSeen'] = time();
@@ -171,6 +192,10 @@ function handle_state(string $room, string $token): void
     });
     if ($res === null) {
         json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    }
+    if (!empty($res['kicked'])) {
+        json_out(['ok' => true, 'kicked' => true]);
+        return;
     }
     json_out(['ok' => true, 'state' => $res['state']]);
 }
@@ -645,6 +670,7 @@ function build_state(array $data, string $token): array
             'score'   => $p['score'],
             'isMe'    => ($tok === $token),
             'isAdmin' => ($tok === ($data['adminToken'] ?? null)),
+            'tok'     => $isAdmin ? $tok : null, // admin kick için token
         ];
     }
 
@@ -653,6 +679,7 @@ function build_state(array $data, string $token): array
         'status'        => $data['status'],
         'isAdmin'       => $isAdmin,
         'isMember'      => isset($data['players'][$token]),
+        'locked'        => !empty($data['locked']),
         'currentLetter' => $data['currentLetter'] ?? null,
         'usedLetters'   => $data['usedLetters'],
         'remaining'     => $remaining,
@@ -737,4 +764,40 @@ function build_state(array $data, string $token): array
     $state['messages'] = $msgs;
 
     return $state;
+}
+
+// Admin: oyuncuyu at ve yasakla
+function handle_kick(string $room, string $token): void
+{
+    $targetTok = (string) inp('target', '');
+    $res = with_room($room, false, function (array &$data) use ($token, $targetTok) {
+        if (($data['adminToken'] ?? null) !== $token) return false;
+        if (!isset($data['players'][$targetTok])) return false;
+        if ($targetTok === $token) return false; // kendini atamazsın
+        $name = $data['players'][$targetTok]['name'];
+        // Yasaklı listeye ekle
+        if (!isset($data['banned'])) $data['banned'] = [];
+        if (!in_array($name, $data['banned'], true)) {
+            $data['banned'][] = $name;
+        }
+        // Oyuncuyu işaretle (kicked flag), sonraki poll'da fark edecek
+        $data['players'][$targetTok]['kicked'] = true;
+        return ['ok' => true, 'kicked' => $name];
+    });
+    if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    if ($res === false) json_out(['ok' => false, 'error' => 'Yetkisiz işlem'], 403);
+    json_out($res);
+}
+
+// Admin: odayı kilitle / kilidini aç
+function handle_toggle_lock(string $room, string $token): void
+{
+    $res = with_room($room, false, function (array &$data) use ($token) {
+        if (($data['adminToken'] ?? null) !== $token) return false;
+        $data['locked'] = empty($data['locked']) ? true : false;
+        return ['ok' => true, 'locked' => $data['locked']];
+    });
+    if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    if ($res === false) json_out(['ok' => false, 'error' => 'Yetkisiz işlem'], 403);
+    json_out($res);
 }

@@ -158,6 +158,15 @@
         return;
       }
       const r = await res.json();
+      if (r.kicked) {
+        closing = true;
+        localStorage.removeItem('is_token_' + ROOM);
+        localStorage.removeItem('is_name_' + ROOM);
+        const go = () => { location.href = 'index.php?kicked=1'; };
+        modalAlert('Admin sizi odadan çıkardı.', go);
+        setTimeout(go, 3000);
+        return;
+      }
       if (!r.ok) {
         appEl.innerHTML = '<div class="card error">' + (r.error || 'Hata') + '</div>';
         return;
@@ -470,8 +479,15 @@
       const btn = el('<button class="primary big">Oyunu Başlat</button>');
       btn.onclick = () => adminAction('start_slot');
       panel.appendChild(btn);
+      // Oda kilidi butonu
+      const lockBtn = el('<button class="ghost big lock-btn">' + (s.locked ? '🔓 Odayı Aç' : '🔒 Odayı Kilitle') + '</button>');
+      lockBtn.onclick = () => adminAction('toggle_lock');
+      panel.appendChild(lockBtn);
     } else {
       panel.appendChild(el('<p class="muted">Adminin oyunu başlatması bekleniyor…</p>'));
+    }
+    if (s.locked) {
+      panel.appendChild(el('<p class="lock-notice">🔒 Oda kilitli — yeni oyuncu giremiyor.</p>'));
     }
 
     // Baloncuk sohbeti
@@ -924,10 +940,13 @@
       sidebar.appendChild(board);
     }
     let html = '<h3>Skor Tablosu</h3><ol class="board">';
-    (s.scoreboard || []).forEach((p, i) => {
-      const pen = p.penalty ? '<span class="bpen" title="Toplam ekran terk cezası">-' + p.penalty + '</span>' : '';
+    (s.players || []).forEach((p, i) => {
+      const pen = p.penalty ? '<span class="bpen">-' + p.penalty + '</span>' : '';
+      const kickBtn = (s.isAdmin && !p.isMe)
+        ? '<button class="kick-btn" data-tok="' + esc(p.tok || '') + '" data-name="' + esc(p.name) + '" title="Oyuncuyu at">✕</button>'
+        : '';
       html += '<li><span class="rank">' + (i + 1) + '</span><span class="bn">' + esc(p.name) +
-        '</span>' + pen + '<span class="bs">' + p.score + '</span></li>';
+        '</span>' + pen + '<span class="bs">' + p.score + '</span>' + kickBtn + '</li>';
     });
     html += '</ol>';
     // kullanılan harfler
@@ -937,6 +956,17 @@
       html += '</div>';
     }
     board.innerHTML = html;
+
+    // Kick butonları
+    board.querySelectorAll('.kick-btn').forEach(btn => {
+      btn.onclick = () => {
+        const name = btn.dataset.name;
+        const tok = btn.dataset.tok;
+        modalConfirm('"' + name + '" oyuncusunu odadan atmak ve yasaklamak istiyor musunuz?', () => {
+          adminAction('kick', { target: tok });
+        });
+      };
+    });
   }
 
   function esc(str) {
