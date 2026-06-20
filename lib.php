@@ -177,9 +177,10 @@ function new_room_struct(string $room): array
 // Döndürür: token => ['answers'=>..., 'points'=>int, 'breakdown'=>[cat=>int]]
 // $invalid: token => [cat => true] -> admin tarafından iptal edilen cevaplar
 // boş sayılır (puan 0 + "aynı cevap" sayımına dahil edilmez).
-function compute_scores(array $players, array $answers, string $letter, array $invalid = []): array
+function compute_scores(array $players, array $answers, string $letter, array $invalid = [], array $extraCats = []): array
 {
     $letterFold = fold_letter(tr_upper($letter));
+    $allCats = array_merge(CATEGORIES, array_column($extraCats, 'key'));
     $results = [];
     foreach (array_keys($players) as $token) {
         $results[$token] = [
@@ -189,7 +190,7 @@ function compute_scores(array $players, array $answers, string $letter, array $i
         ];
     }
 
-    foreach (CATEGORIES as $cat) {
+    foreach ($allCats as $cat) {
         // Bu kategori için geçerli (harfle başlayan, boş olmayan) normalize cevaplar
         $valid = [];   // token => normalize
         $counts = [];  // normalize => adet
@@ -222,6 +223,65 @@ function compute_scores(array $players, array $answers, string $letter, array $i
     }
 
     return $results;
+}
+
+// ---- Aktivite Loglama ----
+function log_dir(): string
+{
+    return __DIR__ . DIRECTORY_SEPARATOR . 'data' . DIRECTORY_SEPARATOR . 'logs';
+}
+
+function get_client_ip(): string
+{
+    foreach (['HTTP_CF_CONNECTING_IP','HTTP_X_FORWARDED_FOR','HTTP_X_REAL_IP','REMOTE_ADDR'] as $k) {
+        if (!empty($_SERVER[$k])) {
+            return explode(',', $_SERVER[$k])[0];
+        }
+    }
+    return '0.0.0.0';
+}
+
+function parse_ua(string $ua): array
+{
+    $mobile = (bool) preg_match('/Mobile|Android|iPhone|iPad|iPod/i', $ua);
+    $browser = 'Diğer';
+    if (strpos($ua, 'Edg') !== false) $browser = 'Edge';
+    elseif (strpos($ua, 'OPR') !== false || strpos($ua, 'Opera') !== false) $browser = 'Opera';
+    elseif (strpos($ua, 'Firefox') !== false) $browser = 'Firefox';
+    elseif (strpos($ua, 'Chrome') !== false) $browser = 'Chrome';
+    elseif (strpos($ua, 'Safari') !== false) $browser = 'Safari';
+    $os = 'Diğer';
+    if (strpos($ua, 'Android') !== false) $os = 'Android';
+    elseif (strpos($ua, 'iPhone') !== false || strpos($ua, 'iPad') !== false) $os = 'iOS';
+    elseif (strpos($ua, 'Windows') !== false) $os = 'Windows';
+    elseif (strpos($ua, 'Macintosh') !== false) $os = 'macOS';
+    elseif (strpos($ua, 'Linux') !== false) $os = 'Linux';
+    return ['browser' => $browser, 'os' => $os, 'mobile' => $mobile];
+}
+
+function write_log(string $action, array $extra = []): void
+{
+    $dir = log_dir();
+    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+    $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    $uaParsed = parse_ua($ua);
+    $entry = array_merge([
+        'ts'      => time(),
+        'action'  => $action,
+        'ip'      => get_client_ip(),
+        'browser' => $uaParsed['browser'],
+        'os'      => $uaParsed['os'],
+        'mobile'  => $uaParsed['mobile'],
+        'ua'      => substr($ua, 0, 200),
+    ], $extra);
+    $file = $dir . DIRECTORY_SEPARATOR . date('Y-m-d') . '.jsonl';
+    $fh = fopen($file, 'a');
+    if ($fh) {
+        flock($fh, LOCK_EX);
+        fwrite($fh, json_encode($entry, JSON_UNESCAPED_UNICODE) . "\n");
+        flock($fh, LOCK_UN);
+        fclose($fh);
+    }
 }
 
 function json_out($data, int $code = 200): void

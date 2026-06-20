@@ -42,24 +42,28 @@
       }
     } catch (_) {}
   }
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      // sadece tur sırasında ve odaya üyeysen
-      if (lastState && lastState.status === 'round' && lastState.isMember) {
-        const now = Date.now();
-        if (now - lastHideAt > 1500) {
-          lastHideAt = now;
-          penaltyPending = true;
-          sendPenalty();
-        }
+  function onHide() {
+    if (lastState && lastState.status === 'round' && lastState.isMember) {
+      const now = Date.now();
+      if (now - lastHideAt > 1500) {
+        lastHideAt = now;
+        penaltyPending = true;
+        sendPenalty();
       }
-    } else {
-      if (penaltyPending) {
-        penaltyPending = false;
-        toast('Ekrandan ayrıldın — 10 puan ceza! ⚠️');
-      }
-      poll(); // her dönüşte lastSeen güncelle
     }
+  }
+  function onShow() {
+    if (penaltyPending) {
+      penaltyPending = false;
+      toast('Ekrandan ayrıldın — 10 puan ceza! ⚠️');
+    }
+    poll();
+  }
+
+  // Sadece visibilitychange — en güvenilir, en az yanlış tetikleme
+  // pagehide/blur kaldırıldı: yenileme, swipe ve bildirimde yanlış ceza veriyordu
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) onHide(); else onShow();
   });
 
   // Eş harfler: çekilen harfle birlikte gösterilen varyant (ikisi de geçerli)
@@ -83,6 +87,9 @@
   let wasAdmin = null;        // admin devri bildirimi için
   let chatOpen = false;
   let unreadCount = 0;
+  let rxPickerOpen = false;
+  const rxPickerEl = document.getElementById('rxPicker');
+  const rxFabBtn   = document.getElementById('rxFabBtn');
   const CHAT_KEY = 'is_chat_' + ROOM;
   let chatHistory = JSON.parse(sessionStorage.getItem(CHAT_KEY) || '[]');
 
@@ -189,6 +196,7 @@
         appEl.innerHTML = '<div class="card error">' + (r.error || 'Hata') + '</div>';
         return;
       }
+      if (r.awayPenalty) toast('Ekrandan ayrıldın — 10 puan ceza! ⚠️');
       render(r.state);
       if (r.state && r.state.voice) voiceMgr.handleSignals(r.state.voice);
     } catch (e) {
@@ -261,6 +269,14 @@
     } else {
       chatFab.style.display = '';
     }
+    // Reaksiyon butonu: lobi dışında her ekranda görünür (chat butonu gibi)
+    if (rxFabBtn) rxFabBtn.style.display = (s.status === 'lobby') ? 'none' : '';
+    // Lobiye dönülünce picker'ı kapat
+    if (s.status === 'lobby' && rxPickerOpen) {
+      rxPickerOpen = false;
+      if (rxPickerEl) rxPickerEl.classList.remove('rx-open');
+      if (rxFabBtn) rxFabBtn.classList.remove('rx-active');
+    }
     // Ana panel imzası: status + harf + oyuncu sayısı + admin mi
     const letter = (s.round && s.round.letter) || s.currentLetter || '';
     let extra = '';
@@ -276,9 +292,10 @@
       viewSig = sig;
       buildMain(s);
     }
-    if (s.status !== 'round') { finishLocal = null; clearFinishTimer(); }
+    if (s.status !== 'round') { finishLocal = null; clearFinishTimer(); showBigCountdown(0, ''); }
     updateDynamic(s);
     processMessages(s);
+    processReactions(s);
   }
 
   // Yeni mesajları baloncuk + panel geçmişine ekle
@@ -310,6 +327,73 @@
         }
       }
     });
+  }
+
+  // ---- Emoji Reaksiyonlar ----
+  const seenReactions = new Set();
+
+  if (rxFabBtn) {
+    rxFabBtn.addEventListener('click', () => {
+      rxPickerOpen = !rxPickerOpen;
+      rxPickerEl.classList.toggle('rx-open', rxPickerOpen);
+      rxFabBtn.classList.toggle('rx-active', rxPickerOpen);
+    });
+  }
+
+  if (rxPickerEl) {
+    rxPickerEl.querySelectorAll('.rx-emoji-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        sendReaction(btn.dataset.emoji);
+        rxPickerOpen = false;
+        rxPickerEl.classList.remove('rx-open');
+        rxFabBtn && rxFabBtn.classList.remove('rx-active');
+      });
+    });
+  }
+
+  function toggleRxPicker() {
+    rxPickerOpen = false;
+    if (rxPickerEl) rxPickerEl.classList.remove('rx-open');
+    if (rxFabBtn) rxFabBtn.classList.remove('rx-active');
+  }
+
+  function sendReaction(emoji) {
+    api('send_reaction', { emoji }).then(r => {
+      if (r && r.id) seenReactions.add(r.id); // kendi emoji'sinin poll'da tekrar çıkmasını engelle
+    }).catch(() => {});
+    spawnFloatingEmoji(emoji, true, null);
+  }
+
+  function processReactions(s) {
+    if (!s.reactions || s.reactions.length === 0) return;
+    s.reactions.forEach(r => {
+      if (seenReactions.has(r.id)) return;
+      seenReactions.add(r.id);
+      spawnFloatingEmoji(r.emoji, false, r.name);
+    });
+    if (seenReactions.size > 200) {
+      const arr = [...seenReactions];
+      arr.slice(0, arr.length - 100).forEach(id => seenReactions.delete(id));
+    }
+  }
+
+  function spawnFloatingEmoji(emoji, isMine, name) {
+    const div = document.createElement('div');
+    div.className = 'floating-emoji' + (isMine ? ' mine' : '');
+    const x = 15 + Math.random() * 70;
+    div.style.left = x + '%';
+    const inner = document.createElement('span');
+    inner.className = 'fe-emoji';
+    inner.textContent = emoji;
+    div.appendChild(inner);
+    if (name) {
+      const label = document.createElement('span');
+      label.className = 'fe-name';
+      label.textContent = name;
+      div.appendChild(label);
+    }
+    document.body.appendChild(div);
+    setTimeout(() => div.remove(), 2800);
   }
 
   // ---- FAB Sohbet Paneli ----
@@ -491,6 +575,52 @@
     else if (s.status === 'gameover') buildGameOver(panel, s);
   }
 
+  // ---- Özel Kategori UI (admin lobi) ----
+  function buildExtraCatsUI(s) {
+    const extra = s.categories.filter(c => c.key.startsWith('custom_'));
+    const wrap = el('<div class="extra-cats-box"></div>');
+    wrap.appendChild(el('<h3 class="extra-cats-title">➕ Özel Kategoriler <small>(maks 3)</small></h3>'));
+
+    // Mevcut özel kategoriler
+    const list = el('<div class="extra-cats-list"></div>');
+    extra.forEach(c => {
+      const tag = el('<span class="extra-cat-tag">' + esc(c.label) +
+        '<button class="extra-cat-rm" data-key="' + esc(c.key) + '">✕</button></span>');
+      tag.querySelector('.extra-cat-rm').onclick = () => {
+        const updated = extra.filter(x => x.key !== c.key);
+        api('set_extra_cats', { cats: updated }).then(() => { viewSig = ''; poll(); }).catch(() => {});
+      };
+      list.appendChild(tag);
+    });
+    wrap.appendChild(list);
+
+    // Ekle formu
+    if (extra.length < 3) {
+      const row = el('<div class="extra-cats-row"></div>');
+      const inp2 = el('<input class="extra-cat-input" type="text" maxlength="20" placeholder="Kategori adı (ör: Film)">');
+      const addBtn = el('<button class="ghost extra-cat-add">Ekle</button>');
+      addBtn.onclick = () => {
+        const label = inp2.value.trim();
+        if (!label) return;
+        if (extra.some(c => c.label.toLowerCase() === label.toLowerCase())) {
+          toast('Bu kategori zaten var'); return;
+        }
+        inp2.value = '';
+        const updated = [...extra, { key: 'custom_' + Date.now(), label }];
+        api('set_extra_cats', { cats: updated }).then(() => { viewSig = ''; poll(); }).catch(() => {});
+      };
+      inp2.onkeydown = e => { if (e.key === 'Enter') addBtn.click(); };
+      row.appendChild(inp2);
+      row.appendChild(addBtn);
+      wrap.appendChild(row);
+    }
+
+    // Standart kategoriler göster
+    const stdLabels = s.categories.filter(c => !c.key.startsWith('custom_')).map(c => c.label).join(', ');
+    wrap.appendChild(el('<p class="extra-cats-std muted">Standart: ' + esc(stdLabels) + '</p>'));
+    return wrap;
+  }
+
   // ---- Lobby ----
   function buildLobby(panel, s) {
     panel.appendChild(el('<h2>Lobi</h2>'));
@@ -503,6 +633,8 @@
       const lockBtn = el('<button class="ghost big lock-btn">' + (s.locked ? '🔓 Odayı Aç' : '🔒 Odayı Kilitle') + '</button>');
       lockBtn.onclick = () => adminAction('toggle_lock');
       panel.appendChild(lockBtn);
+      // Özel kategori
+      panel.appendChild(buildExtraCatsUI(s));
     } else {
       panel.appendChild(el('<p class="muted">Adminin oyunu başlatması bekleniyor…</p>'));
     }
@@ -564,22 +696,77 @@
   // Slot harfini animasyonla göster
   function spinTo(targetLetter) {
     const elLetter = document.getElementById('slotLetter');
-    if (!elLetter) return;
-    let ticks = 0;
-    const total = 18;
+    const slotBox  = document.querySelector('.slot-display');
+    if (!elLetter || !slotBox) return;
+
+    // Hız profili: başta hızlı, sona doğru kademeli yavaşlama
+    const frames = [];
+    const fastCount = 14;  // hızlı kısım
+    const slowCount = 10;  // yavaşlayan kısım
+    for (let i = 0; i < fastCount; i++) frames.push(55);
+    for (let i = 0; i < slowCount; i++) frames.push(70 + i * 28); // giderek yavaşlar
+
+    elLetter.classList.remove('landed', 'slot-reveal');
     elLetter.classList.add('spinning');
-    const iv = setInterval(() => {
-      ticks++;
-      if (ticks >= total) {
-        clearInterval(iv);
-        elLetter.textContent = targetLetter;
+    slotBox.classList.remove('slot-glow');
+
+    let idx = 0;
+    function tick() {
+      if (idx >= frames.length) {
+        // --- Reveal ---
+        elLetter.style.transform = 'translate(-50%, -50%)';
         elLetter.classList.remove('spinning');
-        elLetter.classList.add('landed');
-        setTimeout(() => elLetter.classList.remove('landed'), 600);
-      } else {
-        elLetter.textContent = LETTERS[Math.floor(Math.random() * LETTERS.length)];
+        elLetter.textContent = targetLetter;
+        elLetter.classList.add('slot-reveal');
+        slotBox.classList.add('slot-glow');
+        // Parçacık patlaması
+        spawnParticles(slotBox);
+        // Note'u reveal sonrası göster
+        setTimeout(() => {
+          const note = document.getElementById('slotNote');
+          if (note && PAIRS[targetLetter]) {
+            note.textContent = '"' + targetLetter + '" çekildi — "' + PAIRS[targetLetter] + '" ile de yazabilirsin';
+          }
+        }, 700);
+        setTimeout(() => {
+          elLetter.classList.remove('slot-reveal');
+          slotBox.classList.remove('slot-glow');
+        }, 1400);
+        return;
       }
-    }, 70);
+      elLetter.textContent = LETTERS[Math.floor(Math.random() * LETTERS.length)];
+      // Son 4 frame'de titreme efekti
+      if (idx >= frames.length - 4) {
+        const shake = (frames.length - idx) * 1.5;
+        elLetter.style.transform = `translate(-50%, calc(-50% + ${(Math.random() - .5) * shake}px))`;
+      } else {
+        elLetter.style.transform = 'translate(-50%, -50%)';
+      }
+      setTimeout(tick, frames[idx++]);
+    }
+    tick();
+  }
+
+  function spawnParticles(container) {
+    const colors = ['#ffd700','#a855f7','#22d3ee','#f472b6','#34d399'];
+    for (let i = 0; i < 18; i++) {
+      const p = document.createElement('span');
+      p.className = 'slot-particle';
+      const angle = (Math.PI * 2 / 18) * i + (Math.random() - .5) * .4;
+      const dist  = 70 + Math.random() * 60;
+      p.style.cssText = `
+        left:50%;top:50%;
+        --dx:${Math.cos(angle) * dist}px;
+        --dy:${Math.sin(angle) * dist}px;
+        background:${colors[i % colors.length]};
+        width:${6 + Math.random() * 5}px;
+        height:${6 + Math.random() * 5}px;
+        border-radius:50%;
+        animation-delay:${Math.random() * 80}ms;
+      `;
+      container.appendChild(p);
+      setTimeout(() => p.remove(), 900);
+    }
   }
 
   // ---- Tur (round) ----
@@ -629,8 +816,10 @@
     if (!area || !s || s.status !== 'round' || !s.round) return;
 
     if (finishLocal != null) {
-      area.innerHTML = '<div class="finish-countdown">⏱ Tur bitiyor: <b>' + finishLocal + '</b> sn' +
-        (finishBy ? '<span>“' + esc(finishBy) + '” ilk bitirdi</span>' : '') + '</div>';
+      area.innerHTML = '<div class=”finish-countdown”>⏱ Tur bitiyor: <b>' + finishLocal + '</b> sn' +
+        (finishBy ? '<span>”' + esc(finishBy) + '” ilk bitirdi</span>' : '') + '</div>';
+      // 10sn altında büyük overlay geri sayım
+      showBigCountdown(finishLocal, finishBy);
       return;
     }
 
@@ -665,6 +854,31 @@
     await Promise.all(tasks);
   }
 
+  let lastCountdownSec = -1;
+  function showBigCountdown(sec, by) {
+    if (sec > 10 || sec <= 0) {
+      const el = document.getElementById('bigCountdown');
+      if (el) el.remove();
+      lastCountdownSec = -1;
+      return;
+    }
+    if (sec === lastCountdownSec) return;
+    lastCountdownSec = sec;
+    let el = document.getElementById('bigCountdown');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'bigCountdown';
+      document.body.appendChild(el);
+    }
+    el.className = 'big-countdown' + (sec <= 3 ? ' urgent' : '');
+    el.innerHTML =
+      '<div class="bcd-num">' + sec + '</div>' +
+      '<div class="bcd-label">' + (by ? '"' + esc(by) + '" ilk bitirdi' : 'Tur bitiyor') + '</div>';
+    void el.offsetWidth;
+    el.classList.add('bcd-pop');
+    setTimeout(() => { const e = document.getElementById('bigCountdown'); if(e) e.classList.remove('bcd-pop'); }, 400);
+  }
+
   function ensureFinishTimer() {
     if (finishTimer) return;
     finishTimer = setInterval(() => {
@@ -686,10 +900,15 @@
     card.appendChild(el('<div class="qa-label">' + (roundIdx + 1) + ' / ' + s.categories.length + ' — <strong>' + cat.label + '</strong></div>'));
     const input = el('<input class="qa-input" type="text" maxlength="60" placeholder="' + letterLabel(s.round.letter) + ' ile başlayan bir ' + cat.label.toLowerCase() + '">');
     input.value = localAnswers[cat.key] || '';
+    // Typing göstergesi placeholder
+    const typingEl = el('<div class="typing-indicator" id="typingIndicator"></div>');
+    card.appendChild(typingEl);
+
     input.oninput = () => {
       localAnswers[cat.key] = input.value;
       scheduleSave(cat.key, input.value);
       renderFinishArea();
+      scheduleTyping(cat.key);
     };
     input.onkeydown = (e) => {
       if (e.key === 'Enter') {
@@ -728,6 +947,20 @@
     saveTimers[cat] = setTimeout(() => {
       api('save_answer', { category: cat, value }).catch(() => {});
     }, 400);
+  }
+
+  let typingTimer = null;
+  let typingActive = false;
+  function scheduleTyping(cat) {
+    if (!typingActive) {
+      api('set_typing', { category: cat }).catch(() => {});
+      typingActive = true;
+    }
+    if (typingTimer) clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => {
+      api('set_typing', { category: '' }).catch(() => {});
+      typingActive = false;
+    }, 2500);
   }
 
   // ---- Sonuçlar ----
@@ -825,10 +1058,46 @@
     }
   }
 
+  // ---- Konfeti ----
+  let confettiActive = false;
+  function launchConfetti() {
+    if (confettiActive) return;
+    confettiActive = true;
+    const COLORS = ['#ff4757','#ffa502','#2ed573','#1e90ff','#a29bfe','#fd79a8','#fdcb6e','#fff'];
+    const total = 120;
+    for (let i = 0; i < total; i++) {
+      setTimeout(() => {
+        const p = document.createElement('div');
+        p.className = 'confetti-piece';
+        const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+        const x = Math.random() * 100;
+        const rot = Math.random() * 360;
+        const dur = 2.2 + Math.random() * 1.8;
+        const size = 7 + Math.random() * 8;
+        const isRect = Math.random() > 0.5;
+        p.style.cssText = [
+          'left:' + x + 'vw',
+          'width:' + size + 'px',
+          'height:' + (isRect ? size * 0.45 : size) + 'px',
+          'background:' + color,
+          'border-radius:' + (isRect ? '2px' : '50%'),
+          'animation-duration:' + dur + 's',
+          'animation-delay:' + (Math.random() * 0.6) + 's',
+          '--rot:' + rot + 'deg',
+          '--dx:' + ((Math.random() - 0.5) * 120) + 'px',
+        ].join(';');
+        document.body.appendChild(p);
+        setTimeout(() => p.remove(), (dur + 1) * 1000);
+      }, i * 18);
+    }
+    setTimeout(() => { confettiActive = false; }, total * 18 + 4000);
+  }
+
   // ---- Oyun Bitti (final skor tablosu) ----
   function buildGameOver(panel, s) {
     panel.classList.add('gameover-panel');
     panel.appendChild(el('<div class="go-title">🏆 Oyun Bitti!</div>'));
+    launchConfetti();
 
     const board = (s.scoreboard || []);
     const top = board[0];
@@ -876,10 +1145,14 @@
         const l = document.getElementById('slotLetter');
         if (l && !l.classList.contains('spinning')) l.textContent = '?';
       }
+      // Note'u sadece animasyon bittikten sonra göster
       const note = document.getElementById('slotNote');
-      if (note) note.textContent = (s.currentLetter && PAIRS[s.currentLetter])
-        ? '“' + PAIRS[s.currentLetter] + '” ile de yazabilirsin'
-        : '';
+      const spinning = document.getElementById('slotLetter')?.classList.contains('spinning');
+      if (note && !spinning) {
+        note.textContent = (s.currentLetter && PAIRS[s.currentLetter])
+          ? '”' + s.currentLetter + '” çekildi — “' + PAIRS[s.currentLetter] + '” ile de yazabilirsin'
+          : '';
+      }
       const ctrl = document.getElementById('slotCtrl');
       if (ctrl) {
         if (s.isAdmin) {
@@ -906,6 +1179,26 @@
         clearFinishTimer();
       }
       renderFinishArea();
+
+      // Yazma göstergesi
+      const typingEl = document.getElementById('typingIndicator');
+      if (typingEl && s.round.typing) {
+        const cat = s.categories[roundIdx]?.key;
+        const names = cat ? (s.round.typing[cat] || []) : [];
+        if (names.length > 0) {
+          const txt = names.length === 1
+            ? names[0] + ' yazıyor'
+            : names.slice(0, 2).join(', ') + ' yazıyor';
+          if (typingEl.dataset.txt !== txt) {
+            typingEl.dataset.txt = txt;
+            typingEl.innerHTML = '<span class="ti-dots"><span></span><span></span><span></span></span> ' + esc(txt);
+            typingEl.classList.add('ti-show');
+          }
+        } else {
+          typingEl.classList.remove('ti-show');
+          typingEl.dataset.txt = '';
+        }
+      }
     }
 
     // Skor tablosu (sidebar)
@@ -959,25 +1252,51 @@
       board = el('<div class="board-box" id="boardBox"></div>');
       sidebar.appendChild(board);
     }
+    const players = s.players || [];
+
+    // FLIP — 1) eski konumları kaydet
+    const oldRects = {};
+    board.querySelectorAll('li[data-pname]').forEach(li => {
+      oldRects[li.dataset.pname] = li.getBoundingClientRect().top;
+    });
+
+    // 2) DOM güncelle
     let html = '<h3>Skor Tablosu</h3><ol class="board">';
-    (s.players || []).forEach((p, i) => {
+    players.forEach((p, i) => {
       const pen = p.penalty ? '<span class="bpen">-' + p.penalty + '</span>' : '';
       const kickBtn = s.isAdmin
         ? (p.isMe
             ? '<span class="kick-placeholder"></span>'
             : '<button class="kick-btn" data-tok="' + esc(p.tok || '') + '" data-name="' + esc(p.name) + '" title="Oyuncuyu at">✕</button>')
         : '';
-      html += '<li><span class="rank">' + (i + 1) + '</span><span class="bn">' + esc(p.name) +
-        '</span>' + pen + '<span class="bs">' + p.score + '</span>' + kickBtn + '</li>';
+      html += '<li data-pname="' + esc(p.name) + '">' +
+        '<span class="rank">' + (i + 1) + '</span>' +
+        '<span class="bn">' + esc(p.name) + '</span>' +
+        pen + '<span class="bs">' + p.score + '</span>' + kickBtn + '</li>';
     });
     html += '</ol>';
-    // kullanılan harfler
     if (s.usedLetters && s.usedLetters.length) {
       html += '<h3>Kullanılan Harfler</h3><div class="used-letters">';
       s.usedLetters.forEach(l => html += '<span>' + l + '</span>');
       html += '</div>';
     }
     board.innerHTML = html;
+
+    // 3) FLIP — yeni konumla karşılaştır, fark varsa animate et
+    if (Object.keys(oldRects).length > 0) {
+      board.querySelectorAll('li[data-pname]').forEach(li => {
+        const name = li.dataset.pname;
+        if (oldRects[name] == null) return;
+        const dy = oldRects[name] - li.getBoundingClientRect().top;
+        if (Math.abs(dy) < 2) return;
+        li.style.transition = 'none';
+        li.style.transform = 'translateY(' + dy + 'px)';
+        requestAnimationFrame(() => {
+          li.style.transition = 'transform .55s cubic-bezier(.25,.46,.45,.94)';
+          li.style.transform = '';
+        });
+      });
+    }
 
     // Kick butonları
     board.querySelectorAll('.kick-btn').forEach(btn => {
@@ -997,28 +1316,29 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // ---- Mobil klavye tespiti (visualViewport) ----
-  if (window.visualViewport) {
-    let baseH = window.visualViewport.height;
-    window.visualViewport.addEventListener('resize', () => {
-      const vh = window.visualViewport.height;
-      const ratio = vh / baseH;
-      const kbOpen = ratio < 0.75; // klavye ekranın %25'inden fazlasını kapladı
-      if (kbOpen) {
-        // Chat panel yüksekliğini görünür alana sığdır
-        const panelH = Math.max(vh - 20, 200);
-        document.body.style.setProperty('--kb-panel-h', panelH + 'px');
-        document.body.classList.add('kb-open');
-      } else {
-        document.body.classList.remove('kb-open');
-      }
-    });
-    // İlk yükleme tabanını al
-    window.visualViewport.addEventListener('scroll', () => {
-      if (!document.body.classList.contains('kb-open')) {
-        baseH = window.visualViewport.height;
-      }
-    });
+  // ---- Mobil klavye + fullscreen: visualViewport ile chat paneli konumlandır ----
+  // position:fixed fullscreen'de layout viewport'a göre çalışır, klavyeyi görmez.
+  // Çözüm: chat panelini visualViewport koordinatlarına kilitlemek.
+  const chatPanelEl = document.getElementById('chatPanel');
+
+  if (window.visualViewport && chatPanelEl) {
+    function updateViewport() {
+      const vv = window.visualViewport;
+      const t = Math.round(vv.offsetTop);
+      const h = Math.round(vv.height);
+      const w = Math.round(vv.width);
+      // Chat panelini görünür alana tam oturت
+      chatPanelEl.style.top    = t + 'px';
+      chatPanelEl.style.left   = '0px';
+      chatPanelEl.style.width  = w + 'px';
+      chatPanelEl.style.height = h + 'px';
+      chatPanelEl.style.bottom = 'unset';
+      // action bar klavye açıkken gizle
+      const kbOpen = h < screen.height * 0.75;
+      document.body.classList.toggle('kb-open', kbOpen);
+    }
+    window.visualViewport.addEventListener('resize', updateViewport);
+    window.visualViewport.addEventListener('scroll', updateViewport);
   }
 
   // ---- VoiceManager: WebRTC sesli sohbet ----
@@ -1071,7 +1391,7 @@
       muted = !muted;
       localStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
       micFab.classList.toggle('mic-muted', muted);
-      micFab.querySelector('.ab-icon').textContent = muted ? '🔇' : '🎙️';
+      micFab.querySelector('.ab-icon').textContent = '🎙️';
       api('voice_state', { state: muted ? 'muted' : 'active' });
     }
 

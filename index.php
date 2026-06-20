@@ -440,6 +440,13 @@ roomInput.addEventListener('input', () => {
   roomInput.value = roomInput.value.replace(/[^0-9]/g, '');
 });
 
+// Son kullanılan adı forma doldur
+const nameInput = document.getElementById('name');
+const lastSavedName = localStorage.getItem('is_last_name');
+if (nameInput && lastSavedName && !nameInput.value) {
+  nameInput.value = lastSavedName;
+}
+
 // Form submit
 // Cihaz kimliği: ilk ziyarette üretilir, localStorage'da kalır
 let deviceId = localStorage.getItem('is_device_id');
@@ -483,6 +490,7 @@ form.addEventListener('submit', async (e) => {
     if (!data.ok) throw new Error(data.error || 'Bir hata oluştu.');
     localStorage.setItem('is_token_' + room, data.token);
     localStorage.setItem('is_name_'  + room, name);
+    localStorage.setItem('is_last_name', name);
     location.href = 'game.php?room=' + encodeURIComponent(room);
   } catch (ex) {
     setError(ex.message);
