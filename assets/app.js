@@ -7,6 +7,24 @@
   const appEl = document.getElementById('app');
   const meInfoEl = document.getElementById('meInfo');
 
+  // Tam ekran butonu
+  const fsBtn = document.getElementById('fsBtn');
+  if (fsBtn) {
+    const updateFsIcon = () => {
+      fsBtn.textContent = document.fullscreenElement ? '✕' : '⛶';
+    };
+    fsBtn.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
+    document.addEventListener('fullscreenchange', updateFsIcon);
+    // Fullscreen desteklenmiyorsa butonu gizle
+    if (!document.documentElement.requestFullscreen) fsBtn.hidden = true;
+  }
+
   if (!token) {
     location.href = 'index.php';
     return;
@@ -172,6 +190,7 @@
         return;
       }
       render(r.state);
+      if (r.state && r.state.voice) voiceMgr.handleSignals(r.state.voice);
     } catch (e) {
       // sessizce geç, bir sonraki tur dener
     }
@@ -190,6 +209,7 @@
   // ---- Çıkış ----
   async function doLeave() {
     closing = true;
+    voiceMgr.destroy();
     try { await api('leave'); } catch (_) {}
     localStorage.removeItem('is_token_' + ROOM);
     location.href = 'index.php';
@@ -1000,6 +1020,181 @@
       }
     });
   }
+
+  // ---- VoiceManager: WebRTC sesli sohbet ----
+  const voiceMgr = (() => {
+    const STUN = { iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ]};
+    let localStream = null;
+    let active = false;
+    let muted = false;
+    const peers = {};       // remoteTok → { pc, audioEl }
+    const pendingIce = {};  // remoteTok → [candidate]
+    const processedSig = new Set(); // key → işlendi, tekrar işleme
+    let speakerMuted = false;
+
+    // HTML'deki action bar butonları
+    const micFab = document.getElementById('micFabBtn');
+    const spkFab = document.getElementById('spkFabBtn');
+
+    spkFab.addEventListener('click', () => {
+      speakerMuted = !speakerMuted;
+      Object.values(peers).forEach(({ audioEl }) => { audioEl.muted = speakerMuted; });
+      spkFab.classList.toggle('spk-muted', speakerMuted);
+      spkFab.querySelector('.ab-icon').textContent = speakerMuted ? '🔇' : '🔊';
+    });
+
+    micFab.addEventListener('click', async () => {
+      if (!active) await start();
+      else toggleMute();
+    });
+
+    async function start() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch (e) {
+        toast('Mikrofon erişimi reddedildi veya desteklenmiyor.');
+        return;
+      }
+      active = true;
+      muted = false;
+      micFab.classList.add('mic-active');
+      micFab.querySelector('.ab-icon').textContent = '🎙️';
+      await api('voice_state', { state: 'active' });
+      poll(); // hemen sinyal taraması yap
+    }
+
+    function toggleMute() {
+      if (!localStream) return;
+      muted = !muted;
+      localStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+      micFab.classList.toggle('mic-muted', muted);
+      micFab.querySelector('.ab-icon').textContent = muted ? '🔇' : '🎙️';
+      api('voice_state', { state: muted ? 'muted' : 'active' });
+    }
+
+    function makePeer(remoteTok) {
+      if (peers[remoteTok]) return peers[remoteTok].pc;
+      const pc = new RTCPeerConnection(STUN);
+      const audioEl = document.createElement('audio');
+      audioEl.autoplay = true;
+      audioEl.playsInline = true;
+      document.body.appendChild(audioEl);
+      peers[remoteTok] = { pc, audioEl };
+
+      if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; audioEl.muted = speakerMuted; };
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          api('webrtc_signal', { to: remoteTok, type: 'ice', candidate: e.candidate.toJSON() });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+          audioEl.remove();
+          delete peers[remoteTok];
+        }
+      };
+
+      // Bekleyen ICE'ları uygula
+      (pendingIce[remoteTok] || []).forEach(c =>
+        pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+      );
+      delete pendingIce[remoteTok];
+
+      return pc;
+    }
+
+    async function makeOffer(remoteTok) {
+      if (!active || !localStream || peers[remoteTok]) return;
+      const pc = makePeer(remoteTok);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await api('webrtc_signal', { to: remoteTok, type: 'offer', sdp: offer.sdp });
+    }
+
+    async function handleSignals(voice) {
+      if (!active || !localStream) return;
+
+      // 1) Önce gelen sinyalleri işle (offer/answer)
+      for (const sig of (voice.signals || [])) {
+        const sigKey = sig.key + ':' + sig.type;
+        if (processedSig.has(sigKey)) continue;
+        processedSig.add(sigKey);
+
+        const remoteTok = sig.from;
+        try {
+          if (sig.type === 'offer') {
+            // Glare: iki taraf aynı anda offer gönderdiyse, token'ı küçük olan kazanır (answerer olur)
+            const existingEntry = peers[remoteTok];
+            if (existingEntry && existingEntry.pc.signalingState !== 'stable') {
+              if (token < remoteTok) {
+                // Biz kaybediyoruz: kendi offer'ımızı iptal et, answer ver
+                existingEntry.pc.close();
+                existingEntry.audioEl.remove();
+                delete peers[remoteTok];
+              } else {
+                continue; // Karşı taraf kaybedecek, kendi offer'ımıza devam et
+              }
+            }
+            const pc = makePeer(remoteTok);
+            if (pc.signalingState !== 'stable') continue;
+            if (localStream && pc.getSenders().length === 0) {
+              localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+            }
+            await pc.setRemoteDescription({ type: 'offer', sdp: sig.sdp });
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await api('webrtc_signal', { to: remoteTok, type: 'answer', sdp: answer.sdp });
+          } else if (sig.type === 'answer') {
+            const entry = peers[remoteTok];
+            if (entry && entry.pc.signalingState === 'have-local-offer') {
+              await entry.pc.setRemoteDescription({ type: 'answer', sdp: sig.sdp });
+            }
+          }
+        } catch (e) { /* sinyal geç gelmiş olabilir */ }
+      }
+
+      // 2) ICE candidate'ler
+      for (const ice of (voice.ice || [])) {
+        const iceKey = ice.key + ':' + (ice.candidate && ice.candidate.candidate);
+        if (processedSig.has(iceKey)) continue;
+        processedSig.add(iceKey);
+
+        const remoteTok = ice.from;
+        const entry = peers[remoteTok];
+        if (entry && entry.pc.remoteDescription) {
+          entry.pc.addIceCandidate(new RTCIceCandidate(ice.candidate)).catch(() => {});
+        } else {
+          if (!pendingIce[remoteTok]) pendingIce[remoteTok] = [];
+          pendingIce[remoteTok].push(ice.candidate);
+        }
+      }
+
+      // 3) Sinyaller işlendikten sonra eksik peer'lara offer gönder
+      // Glare prevention: sadece token'ı büyük olan taraf offer gönderir
+      for (const tok of (voice.otherTokens || [])) {
+        if (!peers[tok] && token > tok) await makeOffer(tok);
+      }
+
+      // processedSig'i çok büyütme
+      if (processedSig.size > 500) processedSig.clear();
+    }
+
+    function destroy() {
+      Object.values(peers).forEach(({ pc, audioEl }) => { pc.close(); audioEl.remove(); });
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      active = false;
+      try { api('voice_state', { state: 'off' }); } catch (_) {}
+    }
+
+    return { handleSignals, destroy };
+  })();
 
   // Başlat
   poll();

@@ -12,12 +12,13 @@ if (!valid_room($room)) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oda <?= htmlspecialchars($room) ?> — İsim Şehir</title>
-<link rel="stylesheet" href="assets/style.css?v=35">
+<link rel="stylesheet" href="assets/style.css?v=39">
 </head>
 <body>
 <header class="topbar">
     <div class="room-badge">Oda <span><?= htmlspecialchars($room) ?></span></div>
     <div id="meInfo" class="me-info"></div>
+    <button class="fs-btn" id="fsBtn" title="Tam ekran" aria-label="Tam ekran">⛶</button>
     <a href="index.php" class="leave" id="leaveBtn">Çıkış</a>
 </header>
 
@@ -25,8 +26,12 @@ if (!valid_room($room)) {
     <div class="loading">Yükleniyor…</div>
 </main>
 
-<!-- FAB Sohbet -->
-<button id="chatFab" class="chat-fab" title="Sohbet" aria-label="Sohbet aç">💬<span class="chat-badge" id="chatBadge" hidden>0</span></button>
+<!-- Alt aksiyon barı: hoparlör · mikrofon · sohbet -->
+<div class="action-bar" id="actionBar">
+  <button class="ab-btn spk-fab" id="spkFabBtn" title="Gelen Sesleri Kapat" aria-label="Gelen sesleri kapat"><span class="ab-icon">🔊</span></button>
+  <button class="ab-btn mic-fab" id="micFabBtn" title="Sesli Sohbet" aria-label="Sesli sohbet aç"><span class="ab-icon">🎤</span></button>
+  <button class="ab-btn chat-fab" id="chatFab" title="Sohbet" aria-label="Sohbet aç"><span class="ab-icon">💬</span><span class="chat-badge" id="chatBadge" hidden>0</span></button>
+</div>
 <div id="chatPanel" class="chat-panel" hidden>
   <div class="cp-inner">
     <div class="cp-header"><span>Sohbet</span><button class="cp-clear" id="chatClear">Temizle</button><button class="cp-close" id="chatClose">✕</button></div>
@@ -47,6 +52,6 @@ if (!valid_room($room)) {
 window.IS_ROOM = <?= json_encode($room) ?>;
 window.IS_LETTERS = <?= json_encode(LETTERS, JSON_UNESCAPED_UNICODE) ?>;
 </script>
-<script src="assets/app.js?v=45"></script>
+<script src="assets/app.js?v=50"></script>
 </body>
 </html>

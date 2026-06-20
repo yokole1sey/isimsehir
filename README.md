@@ -22,8 +22,10 @@ Saf **PHP** ile yazıldı, küçük durum verileri için **JSON** kullanır — 
 - 🚩 **Cevap bildirme** — Oyuncular hatalı cevapları bildirebilir; bildirilen cevaplar admin ekranında renk değiştirir.
 - 💬 **Gerçek zamanlı sohbet** — Oyun sırasında ve turlar arasında FAB butonu ile açılır. Emoji desteği, kişi renkleri, mesaj geçmişi (sayfa yenilemede korunur). Masaüstünde sağ kenarda sabit panel, mobilde tam ekran.
 - 💬 **Lobi baloncukları** — Lobide kısa mesaj + hızlı emoji; ekran ortasında süzülerek yükselir.
+- 🎙️ **Sesli sohbet** — WebRTC tabanlı gerçek zamanlı sesli iletişim; sunucu üzerinden geçmez. Alt bar'daki mikrofon butonu ile aktif edilir, sessiz/açık geçiş yapılabilir. Gelen sesler ayrıca kapatılabilir (hoparlör butonu).
 - 🏆 **Final skor tablosu** — Madalyalı, kazanan vurgulu.
-- 📱 **Mobil uyumlu** — Klavye açıkken panel küçülür, skor tablosu mobilde de görünür.
+- 📱 **Mobil uyumlu** — Klavye açıkken panel küçülür, skor tablosu mobilde de görünür. Tam ekran butonu ile adres çubuğu gizlenebilir (Android).
+- 🔢 **Oda kapasitesi** — Bir odaya maksimum 10 oyuncu girebilir.
 - 🔄 **Puan koruması** — Oyuncu oyundan ayrılıp geri dönerse puanı sıfırlanmaz.
 - 🎨 **Gaming teması** — Glassmorphism, neon glow, animasyonlu grid arka plan, Russo One + Chakra Petch fontlar.
 

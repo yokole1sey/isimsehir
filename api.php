@@ -48,6 +48,8 @@ try {
         case 'report_answer':     handle_report($room, $token); break;
         case 'start_finish':   handle_start_finish($room, $token); break;
         case 'penalty':        handle_penalty($room, $token); break;
+        case 'webrtc_signal':  handle_webrtc_signal($room, $token); break;
+        case 'voice_state':    handle_voice_state($room, $token); break;
         default:
             json_out(['ok' => false, 'error' => 'Bilinmeyen işlem'], 400);
     }
@@ -132,6 +134,10 @@ function handle_join(string $room): void
             $data['savedScores']   = [];
             $data['players']       = [];
         }
+        // Oda kapasitesi kontrolü (max 10 oyuncu)
+        if (count($data['players']) >= 10) {
+            return ['full' => true];
+        }
         $isAdmin = false;
         if (empty($data['adminToken'])) {
             $data['adminToken'] = $myToken;
@@ -159,6 +165,9 @@ function handle_join(string $room): void
 
     if (!empty($result['blocked'])) {
         json_out(['ok' => false, 'error' => 'Bu odada oyun çoktan başlamış, şu an girilemez. Oyun bitince tekrar deneyin.'], 409);
+    }
+    if (!empty($result['full'])) {
+        json_out(['ok' => false, 'error' => 'Bu oda dolu (maksimum 10 oyuncu). Başka bir oda deneyin.'], 409);
     }
     if (!empty($result['banned'])) {
         json_out(['ok' => false, 'error' => 'Bu odaya girişiniz admin tarafından engellendi.'], 403);
@@ -775,6 +784,37 @@ function build_state(array $data, string $token): array
     $msgs = array_values(array_filter($data['messages'] ?? [], fn($m) => ($m['ts'] ?? 0) >= $cut));
     $state['messages'] = $msgs;
 
+    // Voice: bu oyuncuya ait sinyaller + herkesin mikrofon durumu
+    $now2 = time();
+    $cutVoice = $now2 - 30; // 30 sn'den eski sinyalleri gönderme
+    $mySignals = [];
+    foreach ($data['webrtcSignals'] ?? [] as $key => $sig) {
+        // key: FROM__TO formatında; TO kısmı bu oyuncu mu?
+        $parts = explode('__', $key, 2);
+        if (count($parts) === 2 && $parts[1] === $token && ($sig['ts'] ?? 0) >= $cutVoice) {
+            $mySignals[] = array_merge(['from' => $parts[0], 'key' => $key], $sig);
+        }
+    }
+    $myIce = [];
+    foreach ($data['iceQueue'] ?? [] as $key => $candidates) {
+        $parts = explode('__', $key, 2);
+        if (count($parts) === 2 && $parts[1] === $token) {
+            foreach ($candidates as $c) {
+                if (($c['ts'] ?? 0) >= $cutVoice) {
+                    $myIce[] = array_merge(['from' => $parts[0], 'key' => $key], $c);
+                }
+            }
+        }
+    }
+    // Diğer token'ların listesi (offer göndermek için)
+    $otherTokens = array_keys(array_filter($data['players'], fn($p, $t) => $t !== $token, ARRAY_FILTER_USE_BOTH));
+    $state['voice'] = [
+        'signals'      => $mySignals,
+        'ice'          => $myIce,
+        'voiceState'   => $data['voiceState'] ?? [],
+        'otherTokens'  => $otherTokens,
+    ];
+
     return $state;
 }
 
@@ -823,4 +863,59 @@ function handle_toggle_lock(string $room, string $token): void
     if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
     if ($res === false) json_out(['ok' => false, 'error' => 'Yetkisiz işlem'], 403);
     json_out($res);
+}
+
+// WebRTC sinyal deposu (offer / answer / ice)
+function handle_webrtc_signal(string $room, string $token): void
+{
+    $to        = (string) inp('to', '');
+    $type      = (string) inp('type', ''); // offer | answer | ice
+    $sdp       = inp('sdp', null);
+    $candidate = inp('candidate', null);
+
+    $res = with_room($room, false, function (array &$data) use ($token, $to, $type, $sdp, $candidate) {
+        if (!isset($data['players'][$token])) return false;
+        if ($to !== '' && !isset($data['players'][$to])) return false;
+        $now = time(); $cutoff = $now - 30;
+        $key = $token . '__' . $to;
+
+        if ($type === 'ice') {
+            if (!isset($data['iceQueue'])) $data['iceQueue'] = [];
+            if (!isset($data['iceQueue'][$key])) $data['iceQueue'][$key] = [];
+            $data['iceQueue'][$key] = array_values(array_filter(
+                $data['iceQueue'][$key], fn($c) => ($c['ts'] ?? 0) >= $cutoff
+            ));
+            $data['iceQueue'][$key][] = ['candidate' => $candidate, 'ts' => $now];
+        } else {
+            if (!isset($data['webrtcSignals'])) $data['webrtcSignals'] = [];
+            $data['webrtcSignals'][$key] = ['type' => $type, 'sdp' => $sdp, 'ts' => $now];
+        }
+        // 30 sn eski sinyalleri temizle
+        foreach (array_keys($data['webrtcSignals'] ?? []) as $k) {
+            if (($data['webrtcSignals'][$k]['ts'] ?? 0) < $cutoff) unset($data['webrtcSignals'][$k]);
+        }
+        return ['ok' => true];
+    });
+    if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    if ($res === false) json_out(['ok' => false, 'error' => 'Yetkisiz'], 403);
+    json_out($res);
+}
+
+// Mikrofon durumu güncelle (active | muted | off)
+function handle_voice_state(string $room, string $token): void
+{
+    $vstate = (string) inp('state', 'off');
+    $res = with_room($room, false, function (array &$data) use ($token, $vstate) {
+        if (!isset($data['players'][$token])) return false;
+        if (!isset($data['voiceState'])) $data['voiceState'] = [];
+        if ($vstate === 'off') {
+            unset($data['voiceState'][$token]);
+        } else {
+            $data['voiceState'][$token] = $vstate;
+        }
+        return ['ok' => true];
+    });
+    if ($res === null) json_out(['ok' => false, 'error' => 'Oda bulunamadı'], 404);
+    if ($res === false) json_out(['ok' => false, 'error' => 'Yetkisiz'], 403);
+    json_out($res ?? ['ok' => false]);
 }
