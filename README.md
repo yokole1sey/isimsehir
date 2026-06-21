@@ -30,7 +30,8 @@ Saf **PHP** ile yazıldı, küçük durum verileri için **JSON** kullanır — 
 - 💬 **Lobi baloncukları** — Lobide kısa mesaj + hızlı emoji; ekranda süzülerek yükselir.
 - 🎙️ **Sesli sohbet** — WebRTC tabanlı gerçek zamanlı sesli iletişim; sunucu üzerinden geçmez. Mikrofon ve hoparlör ayrı ayrı kontrol edilebilir.
 - 🏆 **Final skor tablosu** — Madalyalı, kazanan vurgulu, konfetili.
-- 📱 **Mobil uyumlu** — Klavye açıkken panel küçülür. Tam ekran modu ile adres çubuğu gizlenebilir (Android).
+- 📸 **Sonuç kartı indirme** — Final ekranında "Sonucu İndir" butonuyla Instagram Story boyutunda (1080×1920) paylaşıma hazır görsel oluşturulur; tüm oyuncuları otomatik sığdırır, harici kütüphane gerekmez.
+- 📱 **Mobil uyumlu** — Klavye açıkken panel küçülür. Tam ekran modu ile adres çubuğu gizlenebilir (Android). Tam ekranda klavye öneri şeridi düzgün konumlanır.
 - 🔢 **Oda kapasitesi** — Bir odaya maksimum 10 oyuncu girebilir.
 - 🔄 **Puan koruması** — Oyuncu oyundan ayrılıp geri dönerse puanı sıfırlanmaz.
 - 💾 **İsim hatırlama** — Son kullanılan takma ad bir sonraki girişte otomatik doldurulur.

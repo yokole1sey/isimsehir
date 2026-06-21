@@ -630,6 +630,8 @@ button.big { font-size: 1.05rem; padding: 14px 26px; width: 100%; margin-top: 10
 
 /* ---- Oyun Bitti ekranı ---- */
 .gameover-panel { text-align: center; }
+.go-dl-btn { margin-bottom: 10px; }
+.go-dl-note { font-size: .72rem; color: rgba(255,255,255,.3); letter-spacing: .5px; padding: 10px 0 4px; }
 .go-title { font-size: 2rem; font-weight: 800; margin-bottom: 18px;
   background: linear-gradient(135deg, var(--gold), var(--accent2));
   -webkit-background-clip: text; background-clip: text; color: transparent; }

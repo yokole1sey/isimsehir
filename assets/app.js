@@ -776,7 +776,6 @@
     localAnswers = Object.assign({}, s.round.myAnswers || {});
 
     panel.appendChild(el('<div class="round-letter">Harf: <span>' + letterLabel(letter) + '</span></div>'));
-    panel.appendChild(el('<p class="leave-warn">⚠️ Tur sırasında ekrandan ayrılırsan (sekme/uygulama değiştirme) 10 puan ceza!</p>'));
 
     const card = el('<div class="qa-card" id="qaCard"></div>');
     panel.appendChild(card);
@@ -898,7 +897,7 @@
     const cat = s.categories[roundIdx];
     card.innerHTML = '';
     card.appendChild(el('<div class="qa-label">' + (roundIdx + 1) + ' / ' + s.categories.length + ' — <strong>' + cat.label + '</strong></div>'));
-    const input = el('<input class="qa-input" type="text" maxlength="60" placeholder="' + letterLabel(s.round.letter) + ' ile başlayan bir ' + cat.label.toLowerCase() + '">');
+    const input = el('<input class="qa-input" type="text" maxlength="60" placeholder="' + letterLabel(s.round.letter) + ' ile başlayan bir ' + cat.label.toLowerCase() + '" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">');
     input.value = localAnswers[cat.key] || '';
     // Typing göstergesi placeholder
     const typingEl = el('<div class="typing-indicator" id="typingIndicator"></div>');
@@ -1093,8 +1092,13 @@
     setTimeout(() => { confettiActive = false; }, total * 18 + 4000);
   }
 
+  let goBoard = [];
+  let goRoundsPlayed = 0;
+
   // ---- Oyun Bitti (final skor tablosu) ----
   function buildGameOver(panel, s) {
+    goBoard = s.scoreboard || [];
+    goRoundsPlayed = s.roundsPlayed || 0;
     panel.classList.add('gameover-panel');
     panel.appendChild(el('<div class="go-title">🏆 Oyun Bitti!</div>'));
     launchConfetti();
@@ -1123,12 +1127,150 @@
 
     panel.appendChild(el('<p class="muted center">' + (s.roundsPlayed || 0) + ' tur oynandı</p>'));
 
+    // Fotoğraf indir butonu
+    const dlBtn = el('<button class="ghost big go-dl-btn">📸 Sonucu İndir</button>');
+    dlBtn.onclick = () => downloadGameOver(panel);
+    panel.appendChild(dlBtn);
+
     if (s.isAdmin) {
       const btn = el('<button class="primary big">🔄 Yeni Oyun (aynı oyuncular)</button>');
       btn.onclick = () => modalConfirm('Yeni oyun başlatılsın mı? Puanlar sıfırlanır, oyuncular kalır.', () => adminAction('new_game'));
       panel.appendChild(btn);
     } else {
       panel.appendChild(el('<p class="muted center">Adminin yeni oyun başlatması bekleniyor…</p>'));
+    }
+  }
+
+  function downloadGameOver(panel) {
+    const W = 1080, H = 1920;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+
+    // Arka plan gradyanı
+    const bg = ctx.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0,   '#0d0820');
+    bg.addColorStop(0.5, '#1a0f3a');
+    bg.addColorStop(1,   '#0d0820');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // Üst dekoratif şerit
+    const topGrd = ctx.createLinearGradient(0, 0, W, 0);
+    topGrd.addColorStop(0, '#7c3aed');
+    topGrd.addColorStop(1, '#ec4899');
+    ctx.fillStyle = topGrd;
+    ctx.fillRect(0, 0, W, 12);
+
+    // Alt dekoratif şerit
+    ctx.fillStyle = topGrd;
+    ctx.fillRect(0, H - 12, W, 12);
+
+    // Yardımcı: yuvarlatılmış dikdörtgen
+    function roundRect(x, y, w, h, r, fill, stroke) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3; ctx.stroke(); }
+    }
+
+    // Başlık — İsim Şehir
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = 'bold 52px system-ui, sans-serif';
+    ctx.fillText('İSİM ŞEHİR', W / 2, 130);
+
+    // Kazanan kartı
+    const board = goBoard || [];
+    const winner = board[0];
+    if (winner) {
+      roundRect(80, 180, W - 160, 420, 40, 'rgba(255,204,77,0.10)', 'rgba(255,204,77,0.5)');
+
+      // Taç emoji
+      ctx.font = '180px serif';
+      ctx.fillText('👑', W / 2, 365);
+
+      // Kazanan isim
+      ctx.font = 'bold 100px system-ui, sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(winner.name, W / 2, 490);
+
+      // Puan
+      ctx.font = 'bold 68px system-ui, sans-serif';
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText(winner.score + ' puan', W / 2, 570);
+    }
+
+    // Sıralama listesi — tüm oyuncuları sığdır
+    const medals = ['🥇', '🥈', '🥉'];
+    const padX = 80;
+    const listStart = 660;
+    const listEnd = H - 180;
+    const count = board.length;
+    const gap = 16;
+    const rowH = Math.min(130, Math.floor((listEnd - listStart - gap * (count - 1)) / Math.max(count, 1)));
+    const fontSize = Math.max(36, Math.min(58, rowH * 0.44));
+    const emojiFSize = Math.max(32, Math.min(64, rowH * 0.5));
+
+    board.forEach((p, i) => {
+      const y = listStart + i * (rowH + gap);
+      const isFirst = i === 0;
+      roundRect(padX, y, W - padX * 2, rowH, 24,
+        isFirst ? 'rgba(255,204,77,0.12)' : 'rgba(255,255,255,0.06)',
+        isFirst ? 'rgba(255,204,77,0.4)' : 'rgba(255,255,255,0.12)');
+
+      const midY = y + rowH / 2 + fontSize * 0.36;
+
+      // Madalya / sıra
+      ctx.textAlign = 'left';
+      if (medals[i]) {
+        ctx.font = emojiFSize + 'px serif';
+        ctx.fillText(medals[i], padX + 22, midY);
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.font = 'bold ' + fontSize + 'px system-ui, sans-serif';
+        ctx.fillText(i + 1, padX + 30, midY);
+      }
+
+      // İsim
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold ' + fontSize + 'px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(p.name, padX + emojiFSize + 44, midY);
+
+      // Puan
+      ctx.fillStyle = isFirst ? '#ffd700' : 'rgba(255,255,255,0.7)';
+      ctx.font = 'bold ' + fontSize + 'px system-ui, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(p.score, W - padX - 24, midY);
+    });
+
+    // Alt branding
+    ctx.textAlign = 'center';
+    const brandGrd = ctx.createLinearGradient(W * 0.2, 0, W * 0.8, 0);
+    brandGrd.addColorStop(0, '#7c3aed');
+    brandGrd.addColorStop(1, '#ec4899');
+    ctx.fillStyle = brandGrd;
+    ctx.font = 'bold 42px system-ui, sans-serif';
+    ctx.fillText('birtikyazilim · İsim Şehir Oyunu', W / 2, H - 80);
+
+    // İndir
+    try {
+      const link = document.createElement('a');
+      link.download = 'isim-sehir-sonuc.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch(e) {
+      toast('İndirme başarısız oldu.');
     }
   }
 
@@ -1340,6 +1482,37 @@
     window.visualViewport.addEventListener('resize', updateViewport);
     window.visualViewport.addEventListener('scroll', updateViewport);
   }
+
+  // ---- Fullscreen + klavye öneri şeridi fix (global) ----
+  // Input'a focus olunca fullscreen'den çık. Blur'da geri gir — ama
+  // başka bir input'a geçiliyorsa (focusin hemen arkadan gelir) geri girme.
+  let fsBeforeInput = false;
+  let fsRestoreTimer = null;
+  document.addEventListener('focusin', (e) => {
+    if (!e.target.matches('input, textarea')) return;
+    // Bekleyen fullscreen geri dönüşünü iptal et (input → input geçişi)
+    if (fsRestoreTimer) { clearTimeout(fsRestoreTimer); fsRestoreTimer = null; }
+    if (!document.fullscreenElement) {
+      // Zaten fullscreen dışındayız — önceki input'tan çıkılırken çıkılmıştı
+      fsBeforeInput = true;
+    } else {
+      fsBeforeInput = true;
+      document.exitFullscreen().catch(() => {});
+    }
+  }, { passive: true });
+  document.addEventListener('focusout', (e) => {
+    if (!e.target.matches('input, textarea')) return;
+    if (fsBeforeInput) {
+      // 150ms bekle — başka input'a geçilirse focusin iptal eder
+      fsRestoreTimer = setTimeout(() => {
+        fsRestoreTimer = null;
+        fsBeforeInput = false;
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        }
+      }, 150);
+    }
+  }, { passive: true });
 
   // ---- VoiceManager: WebRTC sesli sohbet ----
   const voiceMgr = (() => {
